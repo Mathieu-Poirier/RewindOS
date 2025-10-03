@@ -3,3 +3,4 @@
 ## Dependency Documentation
 
 - [GNU ld Syntax](https://sourceware.org/binutils/docs/ld/Scripts.html)
+- [Makefile Tutorial](https://makefiletutorial.com/)
