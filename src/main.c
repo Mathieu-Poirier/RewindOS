@@ -4,15 +4,20 @@
 /* - Dynamic Memory */
 /* - Peripherials like UART needed for terminal */
 /* - Task stacks and scheduler structure */
-#include "systick.h"
+/* - Watchdog for safe resetting */
+
+
+#include "stdint.h"
 
 extern int _sdata, _edata, _sbss, _ebss;
+extern void systick_init(uint32_t ticks);
 
 int main(void)
 {
+        systick_init(10000);
         while (1)
         {
-                systick_init();
+
         }
         return 0;
 }
