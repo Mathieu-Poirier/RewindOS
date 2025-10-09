@@ -1,1 +1,0 @@
-void systick_init();
