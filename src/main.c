@@ -7,7 +7,7 @@
 /* - Watchdog for safe resetting */
 
 
-#include "stdint.h"
+#include "../include/stdint.h"
 
 extern int _sdata, _edata, _sbss, _ebss;
 extern void systick_init(uint32_t ticks);
