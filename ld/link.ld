@@ -1,165 +1,173 @@
 /*
 *****************************************************************************
-**
-
-**  File        : LinkerScript.ld
-**
-**  Abstract    : Linker script for STM32F746NGHx Device with
-**                1024KByte FLASH, 320KByte RAM
-**
-**                Set heap size, stack size and stack location according
-**                to application requirements.
-**
-**                Set memory bank area and size if external memory is used.
-**
-**  Target      : STMicroelectronics STM32
-**
-**
-**  Distribution: The file is distributed as is, without any warranty
-**                of any kind.
-**
-*****************************************************************************
-**
-**  File provided by SW4STM32
-**
+**  File        : LinkerScript.ld (RewindOS-ready, no-libc)
+**  Target      : STM32F746NGHx  (1MB FLASH, 320KB internal SRAM)
+**  Notes       :
+**   - Execute code from FLASH (XIP). Kernel data in internal SRAM.
+**   - SDRAM is for user programs, big buffers, and snapshots.
+**   - No libc/newlib required. No C++ constructors/destructors expected.
+**   - Exports symbols used by startup for copies/zeroing and by snapshot logic.
 *****************************************************************************
 */
 
 /* Entry Point */
 ENTRY(Reset_Handler)
 
-/* Highest address of the user mode stack */
-_estack = 0x20050000;    /* end of RAM */
-/* Generate a link error if heap and stack don't fit into RAM */
-_Min_Heap_Size = 0x200;      /* required amount of heap  */
-_Min_Stack_Size = 0x400; /* required amount of stack */
+/* Minimal bookkeeping for heap/stack (tune/remove as needed) */
+_Min_Heap_Size  = 0x200;   /* 512 B */
+_Min_Stack_Size = 0x400;   /* 1 KB  */
 
-/* Specify the memory areas */
+/*============================== MEMORY MAP ==============================*/
 MEMORY
 {
-RAM (xrw)      : ORIGIN = 0x20000000, LENGTH = 320K
-FLASH (rx)      : ORIGIN = 0x8000000, LENGTH = 1024K
+  /* Internal memories */
+  FLASH  (rx)  : ORIGIN = 0x08000000, LENGTH = 1024K    /* internal flash */
+  RAM    (xrw) : ORIGIN = 0x20000000, LENGTH = 320K     /* SRAM (DTCM+SRAM1/2 aggregate if applicable) */
+
+  /* External SDRAM via FMC (adjust LENGTH to your board) */
+  SDRAM  (xrw) : ORIGIN = 0xC0000000, LENGTH = 8M
 }
 
-/* Define output sections */
+/* Top of main stack derived from RAM region */
+_estack = ORIGIN(RAM) + LENGTH(RAM);
+
+/*============================ SNAPSHOT SYMBOLS ==========================*/
+/* Whole-region boundaries (used by snapshot/loader code) */
+PROVIDE(_sram_start  = ORIGIN(RAM));
+PROVIDE(_sram_end    = ORIGIN(RAM)   + LENGTH(RAM));
+PROVIDE(_sdram_start = ORIGIN(SDRAM));
+PROVIDE(_sdram_end   = ORIGIN(SDRAM) + LENGTH(SDRAM));
+
+/*============================== SECTIONS ================================*/
 SECTIONS
 {
-  /* The startup code goes first into FLASH */
+  /* ----------------------- VECTORS & CODE IN FLASH -------------------- */
   .isr_vector :
   {
     . = ALIGN(4);
-    KEEP(*(.isr_vector)) /* Startup code */
+    KEEP(*(.isr_vector))
     . = ALIGN(4);
-  } >FLASH
+  } > FLASH
 
-  /* The program code and other data goes into FLASH */
   .text :
   {
     . = ALIGN(4);
-    *(.text)           /* .text sections (code) */
-    *(.text*)          /* .text* sections (code) */
-    *(.glue_7)         /* glue arm to thumb code */
-    *(.glue_7t)        /* glue thumb to arm code */
-    *(.eh_frame)
-
-    KEEP (*(.init))
-    KEEP (*(.fini))
-
+    *(.text) *(.text*)                     /* all code */
+    *(.glue_7) *(.glue_7t)                 /* ARM/Thumb veneers if any */
     . = ALIGN(4);
-    _etext = .;        /* define a global symbols at end of code */
-  } >FLASH
+    _etext = .;                             /* end of code in FLASH */
+  } > FLASH
 
-  /* Constant data goes into FLASH */
+  /* Place const data in FLASH */
   .rodata :
   {
     . = ALIGN(4);
-    *(.rodata)         /* .rodata sections (constants, strings, etc.) */
-    *(.rodata*)        /* .rodata* sections (constants, strings, etc.) */
+    *(.rodata) *(.rodata*)
     . = ALIGN(4);
-  } >FLASH
+  } > FLASH
 
-  .ARM.extab   : { *(.ARM.extab* .gnu.linkonce.armextab.*) } >FLASH
-  .ARM : {
+  /* Exception index tables (harmless even if you don't use exceptions) */
+  .ARM.extab   : { *(.ARM.extab* .gnu.linkonce.armextab.*) } > FLASH
+  .ARM :
+  {
     __exidx_start = .;
     *(.ARM.exidx*)
     __exidx_end = .;
-  } >FLASH
+  } > FLASH
 
-  .preinit_array     :
-  {
-    PROVIDE_HIDDEN (__preinit_array_start = .);
-    KEEP (*(.preinit_array*))
-    PROVIDE_HIDDEN (__preinit_array_end = .);
-  } >FLASH
-  .init_array :
-  {
-    PROVIDE_HIDDEN (__init_array_start = .);
-    KEEP (*(SORT(.init_array.*)))
-    KEEP (*(.init_array*))
-    PROVIDE_HIDDEN (__init_array_end = .);
-  } >FLASH
-  .fini_array :
-  {
-    PROVIDE_HIDDEN (__fini_array_start = .);
-    KEEP (*(SORT(.fini_array.*)))
-    KEEP (*(.fini_array*))
-    PROVIDE_HIDDEN (__fini_array_end = .);
-  } >FLASH
+  /* ----------------------- RAM INITIALIZED DATA ----------------------- */
 
-  /* used by the startup to initialize data */
+  /* Source address in FLASH for .data (used by startup) */
   _sidata = LOADADDR(.data);
 
-  /* Initialized data sections goes into RAM, load LMA copy after code */
-  .data : 
+  /* .data lives in RAM, loaded from FLASH */
+  .data :
   {
     . = ALIGN(4);
-    _sdata = .;        /* create a global symbol at data start */
-    *(.data)           /* .data sections */
-    *(.data*)          /* .data* sections */
-
+    _sdata = .;                             /* start of .data in RAM */
+    *(.data) *(.data*)
     . = ALIGN(4);
-    _edata = .;        /* define a global symbol at data end */
-  } >RAM AT> FLASH
+    _edata = .;                             /* end of .data in RAM */
+  } > RAM AT > FLASH
 
-  
-  /* Uninitialized data section */
-  . = ALIGN(4);
-  .bss :
+  /* ----------------------- ZEROED DATA IN RAM ------------------------- */
+  .bss (NOLOAD) :
   {
-    /* This is used by the startup in order to initialize the .bss section */
-    _sbss = .;         /* define a global symbol at bss start */
-    __bss_start__ = _sbss;
-    *(.bss)
-    *(.bss*)
-    *(COMMON)
-
     . = ALIGN(4);
-    _ebss = .;         /* define a global symbol at bss end */
-    __bss_end__ = _ebss;
-  } >RAM
+    _sbss = .; __bss_start__ = _sbss;
+    *(.bss) *(.bss*) *(COMMON)
+    . = ALIGN(4);
+    _ebss = .; __bss_end__ = _ebss;
+  } > RAM
 
-  /* User_heap_stack section, used to check that there is enough RAM left */
+  /* ----------------------- OPTIONAL RAM SECTIONS ---------------------- */
+
+  /* Not initialized on reset (retain across soft reset). */
+  .noinit (NOLOAD) :
+  {
+    . = ALIGN(4);
+    _snoinit = .;
+    *(.noinit) *(.noinit*)
+    . = ALIGN(4);
+    _enoinit = .;
+  } > RAM
+
+  /* RAM to exclude from snapshots (DMA rings, caches, scratch). */
+  .snap_exclude (NOLOAD) :
+  {
+    . = ALIGN(4);
+    _ssnap_exclude = .;
+    *(.snap_exclude) *(.snap_exclude*)
+    . = ALIGN(4);
+    _esnap_exclude = .;
+  } > RAM
+
+  /* ----------------------- SDRAM (OPTIONAL, INIT FROM FLASH) ---------- */
+
+  /* Source address in FLASH for .sdram_data (used by startup) */
+  _sisdram_data = LOADADDR(.sdram_data);
+
+  /* Large initialized objects explicitly in SDRAM.
+     Use: __attribute__((section(".sdram_data"))) */
+  .sdram_data :
+  {
+    . = ALIGN(8);
+    _ssdram_data = .;
+    *(.sdram_data) *(.sdram_data*)
+    . = ALIGN(8);
+    _esdram_data = .;
+  } > SDRAM AT > FLASH
+
+  /* ----------------------- HEAP / STACK ACCOUNTING -------------------- */
   ._user_heap_stack :
   {
     . = ALIGN(8);
-    PROVIDE ( end = . );
-    PROVIDE ( _end = . );
+    PROVIDE(end  = .);
+    PROVIDE(_end = .);
     . = . + _Min_Heap_Size;
     . = . + _Min_Stack_Size;
     . = ALIGN(8);
-  } >RAM
+  } > RAM
 
-  
+  /* ----------------------- MISC / ATTRIBUTES -------------------------- */
 
-  /* Remove information from the standard libraries */
+  /* Do NOT forcibly discard libgcc/libm/libc here; simply avoid linking them
+     with -nostdlib/-ffreestanding. Keeping this empty prevents accidental drops. */
   /DISCARD/ :
   {
-    libc.a ( * )
-    libm.a ( * )
-    libgcc.a ( * )
+    *(.comment)
+    *(.note*)
   }
 
   .ARM.attributes 0 : { *(.ARM.attributes) }
 }
 
+/*============================== ASSERTIONS ==============================*/
 
+/* Fail link if internal RAM is overflowed by kernel sections + heap/stack */
+ASSERT(_ebss <= (ORIGIN(RAM) + LENGTH(RAM)),
+       "ERROR: Internal RAM overflow (reduce .data/.bss or move buffers to SDRAM)");
+
+/* Guard that FLASH usage fits device */
+ASSERT(_etext <= (ORIGIN(FLASH) + LENGTH(FLASH)),
+       "ERROR: FLASH overflow");

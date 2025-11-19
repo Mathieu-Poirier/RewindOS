@@ -1,1 +1,8 @@
 *.txt
+*.o
+*.bin
+*.elf
+*.hex
+*.lst
+*.map
+build/
