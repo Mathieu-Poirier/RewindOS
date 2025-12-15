@@ -22,10 +22,11 @@ firmware.hex:
 	arm-none-eabi-as -g -mcpu=cortex-m7 -mthumb src/kernel/set_bus_prescalers.s -o build/flash/set_bus_prescalers.o
 	arm-none-eabi-as -g -mcpu=cortex-m7 -mthumb src/kernel/switch_to_pll_clock.s -o build/flash/switch_to_pll_clock.o
 	arm-none-eabi-as -g -mcpu=cortex-m7 -mthumb src/kernel/flash_latency_init.s -o build/flash/flash_latency_init.o
+	arm-none-eabi-as -g -mcpu=cortex-m7 -mthumb src/kernel/enable_usart1_clock.s -o build/flash/enable_usart1_clock.o
 	
 
 # Linking into firmware	
-	arm-none-eabi-gcc -g -nostartfiles -nodefaultlibs -nostdlib -ffreestanding -mcpu=cortex-m7 -mthumb -T ld/link.ld build/flash/hse_clock_init.o build/flash/flash_latency_init.o build/flash/switch_to_pll_clock.o build/flash/set_bus_prescalers.o build/flash/pll_enable.o build/flash/pll_init.o build/flash/isr.o build/flash/startup.o build/flash/systick.o build/flash/main.o -Wl,-Map=build/flash/firmware.map,--cref -o build/flash/firmware.elf
+	arm-none-eabi-gcc -g -nostartfiles -nodefaultlibs -nostdlib -ffreestanding -mcpu=cortex-m7 -mthumb -T ld/link.ld build/flash/hse_clock_init.o build/flash/flash_latency_init.o build/flash/enable_usart1_clock.o build/flash/switch_to_pll_clock.o build/flash/set_bus_prescalers.o build/flash/pll_enable.o build/flash/pll_init.o build/flash/isr.o build/flash/startup.o build/flash/systick.o build/flash/main.o -Wl,-Map=build/flash/firmware.map,--cref -o build/flash/firmware.elf
 
 	arm-none-eabi-objcopy -O ihex build/flash/firmware.elf build/flash/firmware.hex
 	arm-none-eabi-objcopy -O binary build/flash/firmware.elf build/flash/firmware.bin
