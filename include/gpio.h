@@ -1,0 +1,1 @@
+void enable_gpio_clock(void);

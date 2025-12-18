@@ -1,75 +1,89 @@
+# ===== Toolchain =====
+CC      := arm-none-eabi-gcc
+AS      := arm-none-eabi-as
+OBJCOPY := arm-none-eabi-objcopy
+OBJDUMP := arm-none-eabi-objdump
 
-all: firmware.hex
+# ===== Paths =====
+BUILD   := build/flash
+LDSCRIPT:= ld/link.ld
+ELF     := $(BUILD)/firmware.elf
+HEX     := $(BUILD)/firmware.hex
+BIN     := $(BUILD)/firmware.bin
+LST     := $(BUILD)/firmware.lst
+MAP     := $(BUILD)/firmware.map
 
-# If this looks strange it's because -c passes in commands see OpenOCD program command
-flash:
-	openocd -f interface/stlink.cfg -f target/stm32f7x.cfg -c "program build/flash/firmware.hex verify reset exit" 
+# ===== Flags =====
+CPUFLAGS := -mcpu=cortex-m7 -mthumb
+CFLAGS   := -g -O0 -ffreestanding -Wall -Wextra $(CPUFLAGS) -Iinclude
+ASFLAGS  := -g $(CPUFLAGS)
+LDFLAGS  := -g -nostartfiles -nodefaultlibs -nostdlib -ffreestanding $(CPUFLAGS) \
+            -T $(LDSCRIPT) -Wl,-Map=$(MAP),--cref
 
-firmware.hex:
+# ===== Source discovery =====
+# C sources
+CSRCS := \
+	src/main.c \
+	$(wildcard src/kernel/*.c) \
+	$(wildcard src/drivers/*/*.c)
 
-# Compile C code with gcc
-	arm-none-eabi-gcc -g -c -mcpu=cortex-m7 -mthumb -O0 -ffreestanding -Wall -Wextra src/main.c -o build/flash/main.o
-	arm-none-eabi-gcc -g -c -mcpu=cortex-m7 -mthumb -O0 -ffreestanding -Wall -Wextra src/kernel/isr.c -o build/flash/isr.o
+# ASM sources
+ASRCS := \
+	$(wildcard src/startup/*.s) \
+	$(wildcard src/kernel/*.s) \
+	$(wildcard src/drivers/*/*.s)
 
+# Objects
+COBJS  := $(patsubst src/%.c,$(BUILD)/%.o,$(CSRCS))
+ASOBJS := $(patsubst src/%.s,$(BUILD)/%.o,$(ASRCS))
+OBJS   := $(COBJS) $(ASOBJS)
 
-# Assembling source code
-	arm-none-eabi-as -g -mcpu=cortex-m7 -mthumb src/startup/startup.s -o build/flash/startup.o
-	arm-none-eabi-as -g -mcpu=cortex-m7 -mthumb src/kernel/systick.s -o build/flash/systick.o
-	
-	arm-none-eabi-as -g -mcpu=cortex-m7 -mthumb src/kernel/hse_clock_init.s -o build/flash/hse_clock_init.o
-	arm-none-eabi-as -g -mcpu=cortex-m7 -mthumb src/kernel/pll_init.s -o build/flash/pll_init.o
-	arm-none-eabi-as -g -mcpu=cortex-m7 -mthumb src/kernel/pll_enable.s -o build/flash/pll_enable.o
-	arm-none-eabi-as -g -mcpu=cortex-m7 -mthumb src/kernel/set_bus_prescalers.s -o build/flash/set_bus_prescalers.o
-	arm-none-eabi-as -g -mcpu=cortex-m7 -mthumb src/kernel/switch_to_pll_clock.s -o build/flash/switch_to_pll_clock.o
-	arm-none-eabi-as -g -mcpu=cortex-m7 -mthumb src/kernel/flash_latency_init.s -o build/flash/flash_latency_init.o
-	arm-none-eabi-as -g -mcpu=cortex-m7 -mthumb src/kernel/enable_gpioc.s -o build/flash/enable_gpioc.o
-	arm-none-eabi-as -g -mcpu=cortex-m7 -mthumb src/kernel/enable_usart6_clock.s -o build/flash/enable_usart6_clock.o
-	arm-none-eabi-as -g -mcpu=cortex-m7 -mthumb src/kernel/pc6pc7_to_usart6.s -o build/flash/pc6pc7_to_usart6.o
+# ===== Default =====
+all: $(HEX)
 
+# Ensure build tree exists (including subdirs mirroring src/)
+$(BUILD):
+	@if not exist $(BUILD) mkdir $(BUILD)
 
-	arm-none-eabi-as -g -mcpu=cortex-m7 -mthumb src/kernel/usart6_init.s -o build/flash/usart6_init.o
-	arm-none-eabi-as -g -mcpu=cortex-m7 -mthumb src/kernel/usart6_putc.s -o build/flash/usart6_putc.o
-	arm-none-eabi-as -g -mcpu=cortex-m7 -mthumb src/kernel/usart6_getc.s -o build/flash/usart6_getc.o
+# Create subdirectories for object outputs (Windows cmd)
+# Example: build/flash/drivers/uart/
+define MKDIRP
+	@if not exist "$(dir $@)" mkdir "$(dir $@)"
+endef
 
-	
+# ===== Compile rules =====
+$(BUILD)/%.o: src/%.c | $(BUILD)
+	$(MKDIRP)
+	$(CC) $(CFLAGS) -c $< -o $@
 
-# Linking into firmware	
-	arm-none-eabi-gcc -g -nostartfiles -nodefaultlibs -nostdlib -ffreestanding -mcpu=cortex-m7 -mthumb \
-	-T ld/link.ld \
-	build/flash/hse_clock_init.o \
-	build/flash/enable_gpioc.o \
-	build/flash/pc6pc7_to_usart6.o \
-	build/flash/enable_usart6_clock.o \
-	build/flash/usart6_init.o \
-	build/flash/usart6_putc.o \
-	build/flash/usart6_getc.o \
-	build/flash/flash_latency_init.o \
-	build/flash/switch_to_pll_clock.o \
-	build/flash/set_bus_prescalers.o \
-	build/flash/pll_enable.o \
-	build/flash/pll_init.o \
-	build/flash/isr.o \
-	build/flash/startup.o \
-	build/flash/systick.o \
-	build/flash/main.o \
-	-Wl,-Map=build/flash/firmware.map,--cref \
-	-o build/flash/firmware.elf
+$(BUILD)/%.o: src/%.s | $(BUILD)
+	$(MKDIRP)
+	$(AS) $(ASFLAGS) $< -o $@
 
-	arm-none-eabi-objcopy -O ihex build/flash/firmware.elf build/flash/firmware.hex
-	arm-none-eabi-objcopy -O binary build/flash/firmware.elf build/flash/firmware.bin
-	arm-none-eabi-objdump -d build/flash/firmware.elf > build/flash/firmware.lst
+# ===== Link =====
+$(ELF): $(OBJS)
+	$(CC) $(LDFLAGS) $(OBJS) -o $@
 
-clean:
-	del build\flash\firmware.hex build\flash\firmware.elf build\flash\firmware.bin build\flash\firmware.lst build\flash\firmware.map build\flash\main.o build\flash\startup.o build\flash\systick.o
+# ===== Artifacts =====
+$(HEX): $(ELF)
+	$(OBJCOPY) -O ihex   $(ELF) $(HEX)
+	$(OBJCOPY) -O binary $(ELF) $(BIN)
+	$(OBJDUMP) -d        $(ELF) > $(LST)
 
-# Remote debugging
+# ===== Flash =====
+flash: $(HEX)
+	openocd -f interface/stlink.cfg -f target/stm32f7x.cfg -c "program $(HEX) verify reset exit"
+
+# ===== Debug =====
 debug_host:
 	openocd -f interface/stlink.cfg -f target/stm32f7x.cfg
 
-debug_connect:
-	arm-none-eabi-gdb build/flash/firmware.elf 
+debug_connect: $(ELF)
+	arm-none-eabi-gdb $(ELF)
 
-# target extended-remote localhost:3333
-# monitor reset halt
+# ===== Clean =====
+clean:
+	@if exist build rmdir /S /Q build
 
-.PHONY: clean all flash
+.PHONY: all flash clean debug_host debug_connect
+
