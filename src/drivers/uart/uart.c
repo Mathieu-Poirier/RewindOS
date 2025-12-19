@@ -16,3 +16,11 @@ void uart_init(unsigned int brr)
 
 void uart_putc(char c) { usart6_putc(c); }
 char uart_getc(void) { return usart6_getc(); }
+void uart_puts(const char *s)
+{
+        if (!s)
+                return;
+
+        while (*s)
+                uart_putc(*s++);
+}

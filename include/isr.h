@@ -1,5 +1,4 @@
-#ifndef ISR_H
-#define ISR_H
+#pragma once
 
 #include "stdint.h"
 
@@ -9,4 +8,4 @@ extern volatile uint32_t g_ticks;
 /* SysTick interrupt handler */
 void SysTick_Handler(void);
 
-#endif
+

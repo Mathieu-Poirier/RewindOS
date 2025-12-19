@@ -25,7 +25,8 @@ LDFLAGS  := -g -nostartfiles -nodefaultlibs -nostdlib -ffreestanding $(CPUFLAGS)
 CSRCS := \
 	src/main.c \
 	$(wildcard src/kernel/*.c) \
-	$(wildcard src/drivers/*/*.c)
+	$(wildcard src/drivers/*/*.c) \
+	$(wildcard src/bootmenu/*.c)
 
 # ASM sources
 ASRCS := \
