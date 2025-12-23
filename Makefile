@@ -26,7 +26,8 @@ CSRCS := \
 	src/main.c \
 	$(wildcard src/kernel/*.c) \
 	$(wildcard src/drivers/*/*.c) \
-	$(wildcard src/bootmenu/*.c)
+	$(wildcard src/bootmenu/*.c) \
+	$(wildcard src/allocators/*.c)
 
 # ASM sources
 ASRCS := \
