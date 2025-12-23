@@ -1,7 +1,9 @@
 #include "../include/boot.h"
 #include "../include/uart.h"
+#include "../include/bump.h"
 
 #define LINE_MAX 128
+#define MAX_ARGUMENTS 8
 
 static void prompt(void)
 {
@@ -14,6 +16,78 @@ static void erase_one(void)
         uart_putc('\b');
         uart_putc(' ');
         uart_putc('\b');
+}
+
+static int streq(const char *a, const char *b)
+{
+        while (*a && *b)
+        {
+                if (*a != *b)
+                        return 0;
+                a++;
+                b++;
+        }
+        return (*a == 0 && *b == 0);
+}
+
+static int tokenize(char *line, char **argv, int argv_max)
+{
+        char *p = line;
+        int argc = 0;
+
+        while (*p)
+        {
+                /* skip leading spaces */
+                while (*p == ' ' || *p == '\t')
+                {
+                        p++;
+                }
+
+                if (*p == '\0')
+                        break;
+
+                /* record start of token */
+                if (argc < argv_max)
+                {
+                        argv[argc++] = p;
+                }
+
+                /* scan until space or end */
+                while (*p && *p != ' ' && *p != '\t')
+                {
+                        p++;
+                }
+
+                /* terminate token */
+                if (*p)
+                {
+                        *p = '\0';
+                        p++;
+                }
+        }
+
+        return argc;
+}
+
+static void dispatch_line(char *line)
+{
+        char *argv[MAX_ARGUMENTS];
+        int argc;
+
+        argc = tokenize(line, argv, MAX_ARGUMENTS);
+
+        if (argc == 0)
+                return;
+
+        if (streq(argv[0], "help"))
+        {
+                uart_puts("help\r\n");
+                return;
+        }
+
+        uart_puts("unknown cmd: ");
+        uart_puts(argv[0]);
+        uart_puts("\r\n");
 }
 
 void boot_main(void)
@@ -47,8 +121,7 @@ void boot_main(void)
                         /* Null-terminate line so you can parse it later */
                         line[len] = '\0';
 
-                        /* TODO: handle command here (for now just echo the line as debug) */
-                        /* uart_puts("cmd: "); uart_puts(line); uart_puts("\r\n"); */
+                        dispatch_line(line);
 
                         len = 0;
                         prompt();
