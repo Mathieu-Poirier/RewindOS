@@ -4,88 +4,119 @@ AS      := arm-none-eabi-as
 OBJCOPY := arm-none-eabi-objcopy
 OBJDUMP := arm-none-eabi-objdump
 
-# ===== Paths =====
-BUILD   := build/flash
-LDSCRIPT:= ld/link.ld
-ELF     := $(BUILD)/firmware.elf
-HEX     := $(BUILD)/firmware.hex
-BIN     := $(BUILD)/firmware.bin
-LST     := $(BUILD)/firmware.lst
-MAP     := $(BUILD)/firmware.map
+# ===== Output dirs =====
+BUILD_BOOT := build/flash/boot
+BUILD_MAIN := build/flash/main
+
+# ===== Linker scripts =====
+LDS_BOOT := ld/LinkerScript_boot.ld
+LDS_MAIN := ld/LinkerScript_main.ld
 
 # ===== Flags =====
 CPUFLAGS := -mcpu=cortex-m7 -mthumb
 CFLAGS   := -g -O0 -ffreestanding -Wall -Wextra $(CPUFLAGS) -Iinclude
 ASFLAGS  := -g $(CPUFLAGS)
-LDFLAGS  := -g -nostartfiles -nodefaultlibs -nostdlib -ffreestanding $(CPUFLAGS) \
-            -T $(LDSCRIPT) -Wl,-Map=$(MAP),--cref
+LDFLAGS_BASE := -g -nostartfiles -nodefaultlibs -nostdlib -ffreestanding $(CPUFLAGS)
 
-# ===== Source discovery =====
-# C sources
-CSRCS := \
-	src/main.c \
-	$(wildcard src/kernel/*.c) \
+# ===== Shared sources (compiled into BOTH images) =====
+CSRCS_COMMON := \
 	$(wildcard src/drivers/*/*.c) \
-	$(wildcard src/bootmenu/*.c) \
-	$(wildcard src/allocators/*.c)
+	$(wildcard src/kernel/*.c) \
+	$(wildcard src/allocators/*.c) \
+	$(wildcard src/common_io/*.c)
 
-# ASM sources
-ASRCS := \
+ASRCS_COMMON := \
 	$(wildcard src/startup/*.s) \
 	$(wildcard src/kernel/*.s) \
 	$(wildcard src/drivers/*/*.s)
 
-# Objects
-COBJS  := $(patsubst src/%.c,$(BUILD)/%.o,$(CSRCS))
-ASOBJS := $(patsubst src/%.s,$(BUILD)/%.o,$(ASRCS))
-OBJS   := $(COBJS) $(ASOBJS)
+# ===== Boot image sources =====
+CSRCS_BOOT := \
+	$(CSRCS_COMMON) \
+	$(wildcard src/bootmenu/*.c)
 
-# ===== Default =====
-all: $(HEX)
+ASRCS_BOOT := $(ASRCS_COMMON)
 
-# Ensure build tree exists (including subdirs mirroring src/)
-$(BUILD):
-	@if not exist $(BUILD) mkdir $(BUILD)
+# ===== Main image sources =====
+CSRCS_MAIN := \
+	$(CSRCS_COMMON) \
+	$(wildcard src/terminal/*.c)
 
-# Create subdirectories for object outputs (Windows cmd)
-# Example: build/flash/drivers/uart/
+ASRCS_MAIN := $(ASRCS_COMMON)
+
+# ===== Objects =====
+BOOT_COBJS  := $(patsubst src/%.c,$(BUILD_BOOT)/%.o,$(CSRCS_BOOT))
+BOOT_ASOBJS := $(patsubst src/%.s,$(BUILD_BOOT)/%.o,$(ASRCS_BOOT))
+BOOT_OBJS   := $(BOOT_COBJS) $(BOOT_ASOBJS)
+
+MAIN_COBJS  := $(patsubst src/%.c,$(BUILD_MAIN)/%.o,$(CSRCS_MAIN))
+MAIN_ASOBJS := $(patsubst src/%.s,$(BUILD_MAIN)/%.o,$(ASRCS_MAIN))
+MAIN_OBJS   := $(MAIN_COBJS) $(MAIN_ASOBJS)
+
+# ===== Artifacts =====
+BOOT_ELF := $(BUILD_BOOT)/boot.elf
+BOOT_HEX := $(BUILD_BOOT)/boot.hex
+BOOT_BIN := $(BUILD_BOOT)/boot.bin
+BOOT_LST := $(BUILD_BOOT)/boot.lst
+BOOT_MAP := $(BUILD_BOOT)/boot.map
+
+MAIN_ELF := $(BUILD_MAIN)/main.elf
+MAIN_HEX := $(BUILD_MAIN)/main.hex
+MAIN_BIN := $(BUILD_MAIN)/main.bin
+MAIN_LST := $(BUILD_MAIN)/main.lst
+MAIN_MAP := $(BUILD_MAIN)/main.map
+
+# ===== mkdir helper (Windows cmd) =====
 define MKDIRP
 	@if not exist "$(dir $@)" mkdir "$(dir $@)"
 endef
 
+# ===== Default =====
+all: $(BOOT_HEX) $(MAIN_HEX)
+
 # ===== Compile rules =====
-$(BUILD)/%.o: src/%.c | $(BUILD)
+$(BUILD_BOOT)/%.o: src/%.c
 	$(MKDIRP)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD)/%.o: src/%.s | $(BUILD)
+$(BUILD_BOOT)/%.o: src/%.s
+	$(MKDIRP)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(BUILD_MAIN)/%.o: src/%.c
+	$(MKDIRP)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_MAIN)/%.o: src/%.s
 	$(MKDIRP)
 	$(AS) $(ASFLAGS) $< -o $@
 
 # ===== Link =====
-$(ELF): $(OBJS)
-	$(CC) $(LDFLAGS) $(OBJS) -o $@
+$(BOOT_ELF): $(BOOT_OBJS)
+	$(CC) $(LDFLAGS_BASE) -T $(LDS_BOOT) -Wl,-Map=$(BOOT_MAP),--cref $(BOOT_OBJS) -o $@
 
-# ===== Artifacts =====
-$(HEX): $(ELF)
-	$(OBJCOPY) -O ihex   $(ELF) $(HEX)
-	$(OBJCOPY) -O binary $(ELF) $(BIN)
-	$(OBJDUMP) -d        $(ELF) > $(LST)
+$(MAIN_ELF): $(MAIN_OBJS)
+	$(CC) $(LDFLAGS_BASE) -T $(LDS_MAIN) -Wl,-Map=$(MAIN_MAP),--cref $(MAIN_OBJS) -o $@
 
-# ===== Flash =====
-flash: $(HEX)
-	openocd -f interface/stlink.cfg -f target/stm32f7x.cfg -c "program $(HEX) verify reset exit"
+# ===== Convert =====
+$(BOOT_HEX): $(BOOT_ELF)
+	$(OBJCOPY) -O ihex   $(BOOT_ELF) $(BOOT_HEX)
+	$(OBJCOPY) -O binary $(BOOT_ELF) $(BOOT_BIN)
+	$(OBJDUMP) -d        $(BOOT_ELF) > $(BOOT_LST)
 
-# ===== Debug =====
-debug_host:
-	openocd -f interface/stlink.cfg -f target/stm32f7x.cfg
+$(MAIN_HEX): $(MAIN_ELF)
+	$(OBJCOPY) -O ihex   $(MAIN_ELF) $(MAIN_HEX)
+	$(OBJCOPY) -O binary $(MAIN_ELF) $(MAIN_BIN)
+	$(OBJDUMP) -d        $(MAIN_ELF) > $(MAIN_LST)
 
-debug_connect: $(ELF)
-	arm-none-eabi-gdb $(ELF)
+# ===== Flash both images =====
+flash: all
+	openocd -f interface/stlink.cfg -f target/stm32f7x.cfg \
+		-c "program $(BOOT_HEX) verify reset; \
+		    program $(MAIN_HEX) verify reset; \
+		    reset run; exit"
 
-# ===== Clean =====
 clean:
 	@if exist build rmdir /S /Q build
 
-.PHONY: all flash clean debug_host debug_connect
-
+.PHONY: all flash clean

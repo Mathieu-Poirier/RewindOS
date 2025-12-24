@@ -7,5 +7,4 @@ extern volatile uint32_t g_ticks;
 
 /* SysTick interrupt handler */
 void SysTick_Handler(void);
-
-
+uint32_t systick_now(void);

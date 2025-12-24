@@ -10,6 +10,7 @@ extern void switch_to_pll_clock(void);
 
 void full_clock_init(void)
 {
+        hse_clock_init();
         flash_latency_init();
         set_bus_prescalers();
         pll_init();
