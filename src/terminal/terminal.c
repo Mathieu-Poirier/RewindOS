@@ -2,9 +2,68 @@
 #include "../../include/parse.h"
 #include "../../include/uart.h"
 #include "../../include/systick.h"
+#include "../../include/sd.h"
 
 #define MAX_ARGUMENTS 8
 #define TICKS_PER_SEC 1000u
+#define SD_DUMP_BYTES 64u
+#define SD_READ_MAX_BLOCKS 4u
+
+static uint32_t sd_buf_words[SD_BLOCK_SIZE / 4u];
+
+static void uart_put_s32(int v)
+{
+        if (v < 0)
+        {
+                uart_putc('-');
+                uart_put_u32((uint32_t)(-v));
+                return;
+        }
+        uart_put_u32((uint32_t)v);
+}
+
+static void uart_put_hex8(uint8_t v)
+{
+        static const char *hx = "0123456789ABCDEF";
+        uart_putc(hx[(v >> 4) & 0xF]);
+        uart_putc(hx[v & 0xF]);
+}
+
+static void sd_dump_bytes(const uint8_t *buf, uint32_t count)
+{
+        for (uint32_t i = 0; i < count; i++)
+        {
+                uart_put_hex8(buf[i]);
+                if ((i & 0x0Fu) == 0x0Fu)
+                        uart_puts("\r\n");
+                else
+                        uart_putc(' ');
+        }
+        if ((count & 0x0Fu) != 0u)
+                uart_puts("\r\n");
+}
+
+static void sd_print_info(void)
+{
+        const sd_info_t *info = sd_get_info();
+        if (!info->initialized)
+        {
+                uart_puts("sd not initialized\r\n");
+                return;
+        }
+        uart_puts("rca=");
+        uart_put_hex32(info->rca);
+        uart_puts(" ocr=");
+        uart_put_hex32(info->ocr);
+        uart_puts("\r\n");
+        uart_puts("capacity=");
+        uart_put_u32(info->capacity_blocks / 2048u);
+        uart_puts("MB hc=");
+        uart_put_u32(info->high_capacity);
+        uart_puts(" bus=");
+        uart_put_u32(info->bus_width);
+        uart_puts("bit\r\n");
+}
 
 static void term_dispatch(char *line)
 {
@@ -17,12 +76,23 @@ static void term_dispatch(char *line)
         /* simple built-ins */
         if (streq(argv[0], "help"))
         {
-                uart_puts("help\r\n");
-                uart_puts("echo <text>\r\n");
-                uart_puts("ticks\r\n");
-                uart_puts("uptime\r\n");
-                uart_puts("md <addr> [n]\r\n");
-                uart_puts("reboot\r\n");
+                uart_puts("\r\n");
+                uart_puts("  System\r\n");
+                uart_puts("    reboot            Reboot system\r\n");
+                uart_puts("    uptime            Show uptime\r\n");
+                uart_puts("    ticks             Show tick count\r\n");
+                uart_puts("\r\n");
+                uart_puts("  SD Card\r\n");
+                uart_puts("    sdinit            Initialize SD card\r\n");
+                uart_puts("    sdinfo            Show card info\r\n");
+                uart_puts("    sdtest            Init + read test\r\n");
+                uart_puts("    sdread <lba> [n]  Read blocks (n<=4)\r\n");
+                uart_puts("    sddetect          Check card presence\r\n");
+                uart_puts("\r\n");
+                uart_puts("  Debug\r\n");
+                uart_puts("    md <addr> [n]     Memory dump\r\n");
+                uart_puts("    echo <text>       Echo text\r\n");
+                uart_puts("\r\n");
                 return;
         }
 
@@ -104,6 +174,119 @@ static void term_dispatch(char *line)
                         uart_puts(": ");
                         uart_put_hex32(p[i]);
                         uart_puts("\r\n");
+                }
+                return;
+        }
+
+        if (streq(argv[0], "sdinit"))
+        {
+                sd_use_pll48(1);
+                sd_set_data_clkdiv(SD_CLKDIV_BOOT);
+                int rc = sd_init();
+                if (rc == SD_OK)
+                {
+                        uart_puts("sdinit: ok\r\n");
+                        return;
+                }
+                uart_puts("sdinit: err=");
+                uart_put_s32(rc);
+                uart_puts("\r\n");
+                return;
+        }
+
+        if (streq(argv[0], "sdinfo"))
+        {
+                sd_print_info();
+                return;
+        }
+
+        if (streq(argv[0], "sddetect"))
+        {
+                sd_detect_init();
+                if (sd_is_detected())
+                        uart_puts("sd: present\r\n");
+                else
+                        uart_puts("sd: not present\r\n");
+                return;
+        }
+
+        if (streq(argv[0], "sdtest"))
+        {
+                uart_puts("sdtest: initializing...\r\n");
+                sd_use_pll48(1);
+                sd_set_data_clkdiv(SD_CLKDIV_BOOT);
+                int rc = sd_init();
+                if (rc != SD_OK)
+                {
+                        uart_puts("sdtest: init failed err=");
+                        uart_put_s32(rc);
+                        uart_puts("\r\n");
+                        return;
+                }
+                const sd_info_t *info = sd_get_info();
+                uart_puts("sdtest: ok ");
+                uart_put_u32(info->capacity_blocks / 2048u);
+                uart_puts("MB\r\n");
+
+                uart_puts("sdtest: reading block 0...\r\n");
+                rc = sd_read_blocks(0, 1, sd_buf_words);
+                if (rc != SD_OK)
+                {
+                        uart_puts("sdtest: read err=");
+                        uart_put_s32(rc);
+                        uart_puts("\r\n");
+                        return;
+                }
+                const uint8_t *buf = (const uint8_t *)sd_buf_words;
+                uart_puts("sdtest: sig=");
+                uart_put_hex8(buf[510]);
+                uart_put_hex8(buf[511]);
+                if (buf[510] == 0x55 && buf[511] == 0xAA)
+                        uart_puts(" (MBR)\r\n");
+                else
+                        uart_puts("\r\n");
+                uart_puts("sdtest: PASS\r\n");
+                return;
+        }
+
+        if (streq(argv[0], "sdread"))
+        {
+                if (argc < 2)
+                {
+                        uart_puts("usage: sdread <lba> [count]\r\n");
+                        return;
+                }
+                uint32_t lba = 0;
+                uint32_t count = 1;
+                if (!parse_u32(argv[1], &lba))
+                {
+                        uart_puts("sdread: bad lba\r\n");
+                        return;
+                }
+                if (argc >= 3 && !parse_u32(argv[2], &count))
+                {
+                        uart_puts("sdread: bad count\r\n");
+                        return;
+                }
+                if (count == 0)
+                        count = 1;
+                if (count > SD_READ_MAX_BLOCKS)
+                        count = SD_READ_MAX_BLOCKS;
+
+                for (uint32_t i = 0; i < count; i++)
+                {
+                        int rc = sd_read_blocks(lba + i, 1, sd_buf_words);
+                        if (rc != SD_OK)
+                        {
+                                uart_puts("sdread: err=");
+                                uart_put_s32(rc);
+                                uart_puts("\r\n");
+                                return;
+                        }
+                        uart_puts("lba ");
+                        uart_put_u32(lba + i);
+                        uart_puts(":\r\n");
+                        sd_dump_bytes((const uint8_t *)sd_buf_words, SD_DUMP_BYTES);
                 }
                 return;
         }

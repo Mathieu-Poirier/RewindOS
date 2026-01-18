@@ -94,3 +94,29 @@
 - *Uncached (-):* Memory accesses bypass the cache entirely, meaning every read and write goes directly to main memory or the device, ensuring correct behavior for peripherals but at the cost of speed.
 
 == STM32F746 Memory Map
+== SDMMC1 SD Card Driver
+
+The bootloader includes a blocking SDMMC1 driver for SD cards using SDIO 4-bit mode.
+
+- Pins (AF12): PC8=D0, PC9=D1, PC10=D2, PC11=D3, PC12=CLK, PD2=CMD.
+- Detect: PC13 input with pull-up (active-low card detect switch).
+- Pull-ups: D0-D3 and CMD use pull-up; CLK is no-pull; push-pull, high speed.
+- Clocking: SDMMC1 uses SYSCLK (HSI in bootloader) as the kernel clock; PLL48 (HSI source) is available but disabled in boot by default.
+- Mode: init at ~400 kHz then switch to 4-bit with a faster clock.
+- Blocking: polling-only (no interrupts or DMA).
+
+Bootloader commands:
+
+- `sdinit` initializes the card.
+- `sdinfo` prints RCA/OCR/capacity/bus width.
+- `sdread <lba> [count]` reads and dumps the first 64 bytes of each block.
+- `sddetect` reports whether the card detect switch is active.
+- `sdstat` dumps SDMMC registers plus the last command/status snapshot.
+- `sdclk <sys|pll>` selects the SDMMC1 kernel clock source.
+- `sdclkdiv <0-255>` sets the SDMMC1 clock divider bits and the init divider.
+- `sdtoggle <cycles>` temporarily drives SDMMC pins as GPIO and toggles them (scope check).
+- `sdlast` prints the last SD error/command/status snapshot.
+
+Notes:
+
+- `sd_read_blocks` expects a 32-bit aligned buffer.
