@@ -66,10 +66,23 @@ MAIN_BIN := $(BUILD_MAIN)/main.bin
 MAIN_LST := $(BUILD_MAIN)/main.lst
 MAIN_MAP := $(BUILD_MAIN)/main.map
 
-# ===== mkdir helper (Windows cmd) =====
+# ===== mkdir helper (POSIX) =====
 define MKDIRP
-	@if not exist "$(dir $@)" mkdir "$(dir $@)"
+	@mkdir -p "$(dir $@)"
 endef
+
+# ===== Serial console =====
+PICOCOM ?= picocom
+TTY ?= /dev/ttyUSB0
+BAUD ?= 115200
+
+.PHONY: connect
+connect:
+	@command -v $(PICOCOM) >/dev/null 2>&1 || { echo "$(PICOCOM) is not installed; install picocom or set PICOCOM to another terminal program."; exit 1; }
+	@printf 'waiting for %s' $(TTY)
+	@while [ ! -c "$(TTY)" ]; do printf '.'; sleep 0.2; done
+	@printf '\nlaunching %s\n' $(PICOCOM)
+	@$(PICOCOM) -b $(BAUD) $(TTY)
 
 # ===== Default =====
 all: $(BOOT_HEX) $(MAIN_HEX)
@@ -117,6 +130,6 @@ flash: all
 		    reset run; exit"
 
 clean:
-	@if exist build rmdir /S /Q build
+	@rm -rf build
 
-.PHONY: all flash clean
+.PHONY: all flash clean connect
