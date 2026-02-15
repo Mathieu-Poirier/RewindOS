@@ -4,14 +4,13 @@
 #define SD_BLOCK_SIZE 512u
 
 /* Clock dividers: SDMMC_CK = KERNEL_CLK / (CLKDIV + 2)
- * Boot (HSI 16MHz):   CLKDIV=0  -> 8MHz
- * Fast (PLL48 48MHz): CLKDIV=0  -> 24MHz
- * Fast (SYSCLK 216MHz): CLKDIV=8 -> 21.6MHz (default speed)
- *                       CLKDIV=4 -> 36MHz   (high speed)
+ * Boot (HSI 16MHz, SYSCLK as kernel): CLKDIV=2 -> 4MHz (conservative)
+ * Fast (PLL48 48MHz as kernel):       CLKDIV=0 -> 24MHz
+ * Fast (SYSCLK 216MHz as kernel):     CLKDIV=8 -> 21.6MHz
  */
 #define SD_CLKDIV_INIT  118u  /* ~400kHz for card identification */
-#define SD_CLKDIV_BOOT  0u    /* 8MHz with 16MHz HSI */
-#define SD_CLKDIV_FAST  8u    /* 21.6MHz with 216MHz SYSCLK */
+#define SD_CLKDIV_BOOT  2u    /* 4MHz with 16MHz HSI - safe for boot */
+#define SD_CLKDIV_FAST  0u    /* 24MHz with 48MHz PLL48 */
 #define SD_CLKDIV_HS    4u    /* 36MHz with 216MHz SYSCLK */
 
 #define SD_OK 0

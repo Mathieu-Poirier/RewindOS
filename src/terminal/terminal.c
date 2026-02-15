@@ -1,8 +1,12 @@
 #include "../../include/lineio.h"
+#include "../../include/lineio_async.h"
 #include "../../include/parse.h"
 #include "../../include/uart.h"
+#include "../../include/uart_async.h"
 #include "../../include/systick.h"
 #include "../../include/sd.h"
+#include "../../include/sd_async.h"
+#include "../../include/driver_common.h"
 
 #define MAX_ARGUMENTS 8
 #define TICKS_PER_SEC 1000u
@@ -181,7 +185,7 @@ static void term_dispatch(char *line)
         if (streq(argv[0], "sdinit"))
         {
                 sd_use_pll48(1);
-                sd_set_data_clkdiv(SD_CLKDIV_BOOT);
+                sd_set_data_clkdiv(SD_CLKDIV_FAST);
                 int rc = sd_init();
                 if (rc == SD_OK)
                 {
@@ -214,7 +218,7 @@ static void term_dispatch(char *line)
         {
                 uart_puts("sdtest: initializing...\r\n");
                 sd_use_pll48(1);
-                sd_set_data_clkdiv(SD_CLKDIV_BOOT);
+                sd_set_data_clkdiv(SD_CLKDIV_FAST);
                 int rc = sd_init();
                 if (rc != SD_OK)
                 {
@@ -299,4 +303,23 @@ static void term_dispatch(char *line)
 void terminal_main(void)
 {
         shell_loop("rewind> ", term_dispatch);
+}
+
+void terminal_main_async(void)
+{
+        shell_state_t shell;
+        shell_state_init(&shell, "rewind> ");
+
+        for (;;) {
+                shell_tick(&shell, term_dispatch);
+
+                drv_status_t sd_status = sd_async_poll();
+                if (sd_status == DRV_COMPLETE) {
+                        uart_async_puts("sd: transfer complete\r\n");
+                        sd_async_init();
+                } else if (sd_status == DRV_ERROR) {
+                        uart_async_puts("sd: error\r\n");
+                        sd_async_init();
+                }
+        }
 }

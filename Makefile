@@ -71,6 +71,9 @@ define MKDIRP
 	@mkdir -p "$(dir $@)"
 endef
 
+# ===== Default (must be first target) =====
+all: $(BOOT_HEX) $(MAIN_HEX)
+
 # ===== Serial console =====
 PICOCOM ?= picocom
 TTY ?= /dev/ttyUSB0
@@ -83,9 +86,6 @@ connect:
 	@while [ ! -c "$(TTY)" ]; do printf '.'; sleep 0.2; done
 	@printf '\nlaunching %s\n' $(PICOCOM)
 	@$(PICOCOM) -b $(BAUD) $(TTY)
-
-# ===== Default =====
-all: $(BOOT_HEX) $(MAIN_HEX)
 
 # ===== Compile rules =====
 $(BUILD_BOOT)/%.o: src/%.c

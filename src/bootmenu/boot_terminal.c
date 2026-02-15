@@ -366,6 +366,7 @@ static void boot_dispatch(char *line)
                         div = 255u;
                 sdmmc_set_clkdiv(div);
                 sd_set_init_clkdiv(div);
+                sd_set_data_clkdiv(div);
                 uart_puts("sdclkdiv: ");
                 uart_put_u32(div);
                 uart_puts("\r\n");
