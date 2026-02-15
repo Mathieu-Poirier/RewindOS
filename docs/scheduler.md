@@ -156,6 +156,7 @@ ISR rule: keep ISR short, do minimal data capture, post event, exit.
 
 - `AO_TERMINAL`: command parser and shell interaction.
 - `AO_SD`: async SD transaction workflow/state.
+- `AO_CMD`: command execution worker (runs parsed shell commands as queued task work).
 - `AO_SNAPSHOT`: snapshot scheduling/persistence work.
 - `AO_SHUTDOWN`: staged shutdown/reboot handling.
 - `AO_HEALTH` (optional): watchdog/telemetry/counters.
@@ -241,6 +242,16 @@ Additional rules:
 - If work is not finished, post continuation event to self and return.
 - Do not busy-wait for hardware completion inside dispatch.
 - Keep worst-case RTC step short and measurable.
+
+## Everything-As-Task Policy
+
+For observability and uniform control flow, execute work through registered tasks whenever practical:
+
+- Input task (`AO_TERMINAL`) captures lines/events.
+- Command task (`AO_CMD`) executes parsed commands from a queued mailbox event.
+- Device/service tasks (`AO_SD`, snapshot, shutdown, etc.) handle driver/service workflows.
+
+This keeps scheduler accounting (`events_handled`, queue depth, drops, max RTC) meaningful across both previously async and previously sync paths.
 
 ## Task Template + SD Conversion Playbook
 

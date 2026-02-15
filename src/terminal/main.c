@@ -35,6 +35,10 @@ int main(void)
         {
                 PANIC("terminal task init failed");
         }
+        if (cmd_task_register(&sched) != SCHED_OK)
+        {
+                PANIC("cmd task init failed");
+        }
         if (sd_task_register(&sched) != SCHED_OK)
         {
                 PANIC("sd task init failed");

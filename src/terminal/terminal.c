@@ -10,6 +10,7 @@
 #include "../../include/task_spec.h"
 #include "../../include/task_ids.h"
 #include "../../include/task_signals.h"
+#include "../../include/panic.h"
 
 #define MAX_ARGUMENTS 8
 #define TICKS_PER_SEC 1000u
@@ -17,6 +18,7 @@
 #define SD_READ_MAX_BLOCKS 4u
 
 static uint32_t sd_buf_words[SD_BLOCK_SIZE / 4u];
+#define CMD_MAILBOX_CAP 8u
 
 typedef struct {
         shell_state_t shell;
@@ -24,6 +26,16 @@ typedef struct {
 
 static terminal_task_ctx_t g_term_ctx;
 static event_t g_term_queue_storage[8];
+static scheduler_t *g_sched;
+
+typedef struct {
+        char line[SHELL_LINE_MAX];
+        uint8_t used;
+} cmd_slot_t;
+
+static event_t g_cmd_queue_storage[8];
+static cmd_slot_t g_cmd_slots[CMD_MAILBOX_CAP];
+static uint8_t g_cmd_alloc_cursor;
 
 static void uart_put_s32(int v)
 {
@@ -79,7 +91,35 @@ static void sd_print_info(void)
         uart_puts("bit\r\n");
 }
 
-static void term_dispatch(char *line)
+static int cmd_slot_alloc_copy(const char *line)
+{
+        for (uint32_t i = 0; i < CMD_MAILBOX_CAP; i++)
+        {
+                uint8_t idx = (uint8_t)((g_cmd_alloc_cursor + i) % CMD_MAILBOX_CAP);
+                if (g_cmd_slots[idx].used)
+                        continue;
+
+                uint32_t j = 0;
+                while (j < (SHELL_LINE_MAX - 1u) && line[j] != '\0')
+                {
+                        g_cmd_slots[idx].line[j] = line[j];
+                        j++;
+                }
+                g_cmd_slots[idx].line[j] = '\0';
+                g_cmd_slots[idx].used = 1u;
+                g_cmd_alloc_cursor = (uint8_t)((idx + 1u) % CMD_MAILBOX_CAP);
+                return (int)idx;
+        }
+        return -1;
+}
+
+static void cmd_slot_release(uint8_t idx)
+{
+        PANIC_IF(idx >= CMD_MAILBOX_CAP, "cmd slot idx out of range");
+        g_cmd_slots[idx].used = 0u;
+}
+
+static void term_execute(char *line)
 {
         char *argv[MAX_ARGUMENTS];
         int argc = tokenize(line, argv, MAX_ARGUMENTS);
@@ -343,6 +383,28 @@ static void term_dispatch(char *line)
         uart_puts("\r\n");
 }
 
+static void term_enqueue_dispatch(char *line)
+{
+        if (g_sched == 0)
+        {
+                PANIC("terminal scheduler not bound");
+        }
+
+        int slot = cmd_slot_alloc_copy(line);
+        if (slot < 0)
+        {
+                uart_puts("cmd queue full\r\n");
+                return;
+        }
+
+        int rc = sched_post(g_sched, AO_CMD, &(event_t){ .sig = CMD_SIG_EXEC, .arg0 = (uintptr_t)slot });
+        if (rc != SCHED_OK)
+        {
+                cmd_slot_release((uint8_t)slot);
+                uart_puts("cmd dispatch failed\r\n");
+        }
+}
+
 static void terminal_task_dispatch(ao_t *self, const event_t *e)
 {
         (void)self;
@@ -351,7 +413,7 @@ static void terminal_task_dispatch(ao_t *self, const event_t *e)
 
         for (;;) {
                 while (uart_rx_available()) {
-                        shell_tick(&g_term_ctx.shell, term_dispatch);
+                        shell_tick(&g_term_ctx.shell, term_enqueue_dispatch);
                 }
                 if (!uart_async_rx_event_finish()) {
                         break;
@@ -364,6 +426,7 @@ int terminal_task_register(scheduler_t *sched)
         if (sched == 0)
                 return SCHED_ERR_PARAM;
 
+        g_sched = sched;
         shell_state_init(&g_term_ctx.shell, "rewind> ");
         uart_async_bind_scheduler(sched, AO_TERMINAL, TERM_SIG_UART_RX_READY);
 
@@ -376,6 +439,42 @@ int terminal_task_register(scheduler_t *sched)
         spec.queue_capacity = (uint16_t)(sizeof(g_term_queue_storage) / sizeof(g_term_queue_storage[0]));
         spec.rtc_budget_ticks = 1;
         spec.name = "terminal";
+
+        return sched_register_task(sched, &spec);
+}
+
+static void cmd_task_dispatch(ao_t *self, const event_t *e)
+{
+        (void)self;
+        if (e == 0 || e->sig != CMD_SIG_EXEC)
+                return;
+
+        uint8_t idx = (uint8_t)e->arg0;
+        PANIC_IF(idx >= CMD_MAILBOX_CAP, "cmd event idx out of range");
+        PANIC_IF(g_cmd_slots[idx].used == 0u, "cmd event for free slot");
+
+        term_execute(g_cmd_slots[idx].line);
+        cmd_slot_release(idx);
+}
+
+int cmd_task_register(scheduler_t *sched)
+{
+        if (sched == 0)
+                return SCHED_ERR_PARAM;
+
+        task_spec_t spec;
+        spec.id = AO_CMD;
+        spec.prio = 0;
+        spec.dispatch = cmd_task_dispatch;
+        spec.ctx = g_cmd_slots;
+        spec.queue_storage = g_cmd_queue_storage;
+        spec.queue_capacity = (uint16_t)(sizeof(g_cmd_queue_storage) / sizeof(g_cmd_queue_storage[0]));
+        spec.rtc_budget_ticks = 1;
+        spec.name = "cmd";
+
+        for (uint32_t i = 0; i < CMD_MAILBOX_CAP; i++)
+                g_cmd_slots[i].used = 0u;
+        g_cmd_alloc_cursor = 0u;
 
         return sched_register_task(sched, &spec);
 }
