@@ -1,4 +1,3 @@
-#include "../../include/lineio.h"
 #include "../../include/lineio_async.h"
 #include "../../include/parse.h"
 #include "../../include/uart.h"
@@ -7,6 +6,10 @@
 #include "../../include/sd.h"
 #include "../../include/sd_async.h"
 #include "../../include/driver_common.h"
+#include "../../include/scheduler.h"
+#include "../../include/task_spec.h"
+#include "../../include/task_ids.h"
+#include "../../include/task_signals.h"
 
 #define MAX_ARGUMENTS 8
 #define TICKS_PER_SEC 1000u
@@ -14,6 +17,13 @@
 #define SD_READ_MAX_BLOCKS 4u
 
 static uint32_t sd_buf_words[SD_BLOCK_SIZE / 4u];
+
+typedef struct {
+        shell_state_t shell;
+} terminal_task_ctx_t;
+
+static terminal_task_ctx_t g_term_ctx;
+static event_t g_term_queue_storage[8];
 
 static void uart_put_s32(int v)
 {
@@ -91,6 +101,7 @@ static void term_dispatch(char *line)
                 uart_puts("    sdinfo            Show card info\r\n");
                 uart_puts("    sdtest            Init + read test\r\n");
                 uart_puts("    sdread <lba> [n]  Read blocks (n<=4)\r\n");
+                uart_puts("    sdaread <lba>     Async read one block\r\n");
                 uart_puts("    sddetect          Check card presence\r\n");
                 uart_puts("\r\n");
                 uart_puts("  Debug\r\n");
@@ -295,31 +306,76 @@ static void term_dispatch(char *line)
                 return;
         }
 
+        if (streq(argv[0], "sdaread"))
+        {
+                if (argc < 2)
+                {
+                        uart_puts("usage: sdaread <lba>\r\n");
+                        return;
+                }
+
+                uint32_t lba = 0;
+                if (!parse_u32(argv[1], &lba))
+                {
+                        uart_puts("sdaread: bad lba\r\n");
+                        return;
+                }
+                if (sd_async_poll() == DRV_IN_PROGRESS)
+                {
+                        uart_puts("sdaread: busy\r\n");
+                        return;
+                }
+
+                int rc = sd_async_read_start(lba, 1, sd_buf_words);
+                if (rc != SD_OK)
+                {
+                        uart_puts("sdaread: err=");
+                        uart_put_s32(rc);
+                        uart_puts("\r\n");
+                        return;
+                }
+                uart_puts("sdaread: started\r\n");
+                return;
+        }
+
         uart_puts("unknown cmd: ");
         uart_puts(argv[0]);
         uart_puts("\r\n");
 }
 
-void terminal_main(void)
+static void terminal_task_dispatch(ao_t *self, const event_t *e)
 {
-        shell_loop("rewind> ", term_dispatch);
-}
-
-void terminal_main_async(void)
-{
-        shell_state_t shell;
-        shell_state_init(&shell, "rewind> ");
+        (void)self;
+        if (e == 0 || e->sig != TERM_SIG_UART_RX_READY)
+                return;
 
         for (;;) {
-                shell_tick(&shell, term_dispatch);
-
-                drv_status_t sd_status = sd_async_poll();
-                if (sd_status == DRV_COMPLETE) {
-                        uart_async_puts("sd: transfer complete\r\n");
-                        sd_async_init();
-                } else if (sd_status == DRV_ERROR) {
-                        uart_async_puts("sd: error\r\n");
-                        sd_async_init();
+                while (uart_rx_available()) {
+                        shell_tick(&g_term_ctx.shell, term_dispatch);
+                }
+                if (!uart_async_rx_event_finish()) {
+                        break;
                 }
         }
+}
+
+int terminal_task_register(scheduler_t *sched)
+{
+        if (sched == 0)
+                return SCHED_ERR_PARAM;
+
+        shell_state_init(&g_term_ctx.shell, "rewind> ");
+        uart_async_bind_scheduler(sched, AO_TERMINAL, TERM_SIG_UART_RX_READY);
+
+        task_spec_t spec;
+        spec.id = AO_TERMINAL;
+        spec.prio = 1;
+        spec.dispatch = terminal_task_dispatch;
+        spec.ctx = &g_term_ctx;
+        spec.queue_storage = g_term_queue_storage;
+        spec.queue_capacity = (uint16_t)(sizeof(g_term_queue_storage) / sizeof(g_term_queue_storage[0]));
+        spec.rtc_budget_ticks = 1;
+        spec.name = "terminal";
+
+        return sched_register_task(sched, &spec);
 }

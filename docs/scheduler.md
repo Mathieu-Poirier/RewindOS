@@ -166,12 +166,14 @@ Canonical API now lives in:
 
 - `include/event.h`
 - `include/scheduler.h`
+- `include/task_spec.h`
 
 ### Scheduler API
 
 ```c
 void sched_init(scheduler_t *s, void (*idle_hook)(void));
 int  sched_register(scheduler_t *s, ao_t *ao);
+int  sched_register_task(scheduler_t *s, const task_spec_t *spec);
 int  sched_unregister(scheduler_t *s, uint8_t ao_id);
 int  sched_post(scheduler_t *s, uint8_t ao_id, const event_t *e);      // thread context
 int  sched_post_isr(scheduler_t *s, uint8_t ao_id, const event_t *e);  // ISR-safe
@@ -209,6 +211,22 @@ EQ_OK, EQ_ERR_PARAM, EQ_ERR_FULL, EQ_ERR_EMPTY
 - Critical sections around queue index updates must be bounded and minimal.
 - Never block inside AO dispatch.
 
+## Runtime Panic Policy
+
+Use `PANIC(...)` for unrecoverable kernel invariants, not for normal runtime errors.
+
+- `PANIC` means the kernel can no longer guarantee correct scheduling behavior.
+- `PANIC_IF(cond, msg)` is the conditional form.
+- Panic path should:
+  - disable interrupts
+  - emit diagnostic text
+  - halt in a debug-friendly loop (`bkpt`/`wfi`)
+
+Guideline:
+
+- Driver/IO failures (CRC timeout, device not present, queue full) should become events/errors, not panic.
+- Structural corruption (invalid scheduler state, null dispatch for ready task, impossible invariants) can panic.
+
 ## Task Dispatch Contract
 
 Each AO/task handler must follow this RTC contract:
@@ -223,6 +241,150 @@ Additional rules:
 - If work is not finished, post continuation event to self and return.
 - Do not busy-wait for hardware completion inside dispatch.
 - Keep worst-case RTC step short and measurable.
+
+## Task Template + SD Conversion Playbook
+
+### A) Minimum Task Interface (to prevent drift)
+
+Every new kernel task should provide this minimum spec before registration:
+
+```c
+typedef struct {
+    uint8_t id;
+    uint8_t prio;
+    ao_dispatch_fn dispatch;   // required
+    void *ctx;                 // required
+    event_t *queue_storage;    // required
+    uint16_t queue_capacity;   // required (>0)
+    uint32_t rtc_budget_ticks; // required: expected max RTC budget
+    const char *name;          // optional but recommended
+} task_spec_t;
+```
+
+Registration gate idea:
+
+```c
+int sched_register_task(scheduler_t *s, const task_spec_t *spec);
+```
+
+Validation in `sched_register_task`:
+
+- reject null `dispatch` or null `ctx`
+- reject zero queue capacity or null queue storage
+- reject invalid/duplicate task ID
+- reject out-of-range priority
+
+This keeps task implementation consistent and prevents partial task definitions.
+
+### B) Task Development Checklist
+
+1. Define event signals (`EV_*`) for the task.
+2. Define task context struct (all persistent state in one place).
+3. Implement `dispatch` as `switch (e->sig)` RTC handlers.
+4. Ensure each case does bounded work and returns.
+5. Use self-post for continuation (`EV_CONT`) when CPU work is chunked.
+6. Use ISR-post for hardware completion/failure events.
+7. Add counters: handled events, dropped events, max RTC ticks.
+8. Register task using the minimum task spec.
+
+### C) SD Driver Conversion Pattern (Chunked RTC)
+
+#### Signals
+
+```c
+enum {
+    EV_SD_READ_REQ = 1,
+    EV_SD_CMD_SENT,
+    EV_SD_FIFO_CHUNK,
+    EV_SD_BLOCK_DONE,
+    EV_SD_DONE,
+    EV_SD_ERR,
+    EV_SD_CONT
+};
+```
+
+#### Context
+
+```c
+typedef struct {
+    uint32_t lba;
+    uint32_t total_blocks;
+    uint32_t blocks_done;
+    uint8_t *buf;
+    uint8_t *ptr;
+    uint32_t fifo_words_left;
+    int busy;
+    int last_error;
+} sd_task_ctx_t;
+```
+
+#### Dispatch skeleton
+
+```c
+static void sd_dispatch(ao_t *self, const event_t *e)
+{
+    sd_task_ctx_t *ctx = (sd_task_ctx_t *)self->state;
+
+    switch (e->sig) {
+    case EV_SD_READ_REQ:
+        /* validate request, init ctx, issue first HW command */
+        ctx->busy = 1;
+        sd_hw_start_block(ctx->lba);
+        return;
+
+    case EV_SD_FIFO_CHUNK:
+        /* move bounded FIFO chunk only, then return */
+        sd_copy_fifo_chunk(ctx);
+        if (ctx->fifo_words_left > 0) {
+            sched_post(&g_sched, self->id, &(event_t){ .sig = EV_SD_CONT });
+        }
+        return;
+
+    case EV_SD_CONT:
+        /* continuation of CPU-side chunking */
+        sd_continue_chunk(ctx);
+        return;
+
+    case EV_SD_BLOCK_DONE:
+        ctx->blocks_done++;
+        if (ctx->blocks_done < ctx->total_blocks) {
+            sd_hw_start_block(ctx->lba + ctx->blocks_done);
+        } else {
+            sched_post(&g_sched, self->id, &(event_t){ .sig = EV_SD_DONE });
+        }
+        return;
+
+    case EV_SD_DONE:
+        ctx->busy = 0;
+        notify_client_ok();
+        return;
+
+    case EV_SD_ERR:
+        ctx->busy = 0;
+        ctx->last_error = (int)e->arg0;
+        notify_client_err(ctx->last_error);
+        return;
+    }
+}
+```
+
+#### Self-post vs ISR-post rule
+
+- Post to self (`EV_SD_CONT`) when next step is internal CPU continuation.
+- Post from ISR (`EV_SD_FIFO_CHUNK`, `EV_SD_BLOCK_DONE`, `EV_SD_ERR`) when hardware indicates progress/completion/error.
+
+### D) Practical Splitting Heuristic
+
+When converting blocking code, break at:
+
+- hardware wait points
+- large loops over buffers/blocks
+- command boundaries (send cmd -> await response -> process data)
+
+Each breakpoint becomes either:
+
+- event posted by ISR (for hardware edge), or
+- self continuation event (for long CPU loop chunking).
 
 ## Response-Time Guidance
 

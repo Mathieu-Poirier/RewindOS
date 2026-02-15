@@ -2,11 +2,9 @@
 
 #include "stdint.h"
 #include "event.h"
+#include "task_spec.h"
 
 #define SCHED_MAX_AO 32u
-
-typedef struct ao ao_t;
-typedef void (*ao_dispatch_fn)(ao_t *self, const event_t *e);
 
 typedef struct {
     uint16_t task_id;
@@ -30,8 +28,9 @@ struct ao {
 };
 
 typedef struct {
-    ao_t *table[SCHED_MAX_AO];
-    volatile uint32_t ready_bitmap;
+    ao_t *table[SCHED_MAX_AO];          /* indexed by AO id */
+    volatile uint32_t ready_bitmap;     /* bit(id)=queue non-empty */
+    uint8_t rr_cursor[SCHED_MAX_AO];    /* indexed by priority */
     void (*idle_hook)(void);
 } scheduler_t;
 
@@ -51,6 +50,7 @@ enum {
 
 void sched_init(scheduler_t *s, void (*idle_hook)(void));
 int  sched_register(scheduler_t *s, ao_t *ao);
+int  sched_register_task(scheduler_t *s, const task_spec_t *spec);
 int  sched_unregister(scheduler_t *s, uint8_t ao_id);
 
 int  sched_post(scheduler_t *s, uint8_t ao_id, const event_t *e);

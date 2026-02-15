@@ -22,6 +22,7 @@ LDFLAGS_BASE := -g -nostartfiles -nodefaultlibs -nostdlib -ffreestanding $(CPUFL
 CSRCS_COMMON := \
 	$(wildcard src/drivers/*/*.c) \
 	$(wildcard src/kernel/*.c) \
+	$(wildcard src/scheduler/*.c) \
 	$(wildcard src/allocators/*.c) \
 	$(wildcard src/common_io/*.c)
 

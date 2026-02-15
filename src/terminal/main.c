@@ -5,13 +5,22 @@
 #include "../../include/bump.h"
 #include "../../include/clock.h"
 #include "../../include/stdint.h"
+#include "../../include/scheduler.h"
+#include "../../include/terminal.h"
+#include "../../include/sd_task.h"
+#include "../../include/panic.h"
 
-extern void terminal_main(void);
-extern void terminal_main_async(void);
 extern void systick_init(uint32_t ticks);
+
+static void idle_hook(void)
+{
+        __asm__ volatile("wfi");
+}
 
 int main(void)
 {
+        scheduler_t sched;
+
         full_clock_init();
         enable_gpio_clock();
         uart_init(108000000u, 115200u);
@@ -21,7 +30,17 @@ int main(void)
         uart_async_init();
         sd_async_init();
 
-        terminal_main_async();
+        sched_init(&sched, idle_hook);
+        if (terminal_task_register(&sched) != SCHED_OK)
+        {
+                PANIC("terminal task init failed");
+        }
+        if (sd_task_register(&sched) != SCHED_OK)
+        {
+                PANIC("sd task init failed");
+        }
+
+        sched_run(&sched);
         for (;;)
         {
         }
