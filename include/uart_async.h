@@ -39,5 +39,7 @@ int  uart_rx_available(void);
 void uart_async_bind_scheduler(scheduler_t *sched, uint8_t ao_id, uint16_t rx_sig);
 void uart_async_unbind_scheduler(void);
 int  uart_async_rx_event_finish(void);
+void uart_async_bind_tx_notifier(scheduler_t *sched, uint8_t ao_id, uint16_t tx_sig);
+void uart_async_unbind_tx_notifier(void);
 
 void USART6_IRQHandler(void);

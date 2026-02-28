@@ -25,6 +25,7 @@ struct ao {
     volatile uint32_t flags;
     volatile uint32_t rtc_max_ticks;
     volatile uint32_t events_handled;
+    const char *name;
 };
 
 typedef struct {

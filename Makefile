@@ -124,11 +124,15 @@ $(MAIN_HEX): $(MAIN_ELF)
 	$(OBJDUMP) -d        $(MAIN_ELF) > $(MAIN_LST)
 
 # ===== Flash both images =====
+# reset_config srst_only: use hardware SRST before connecting so the debugger
+# can reach the core even when the MCU is in Standby (debug port power-gated).
 flash: all
 	openocd -f interface/stlink.cfg -f target/stm32f7x.cfg \
-		-c "program $(BOOT_HEX) verify reset; \
-		    program $(MAIN_HEX) verify reset; \
-		    reset run; exit"
+		-c "reset_config srst_only srst_nogate" \
+		-c "init; reset halt" \
+		-c "program $(BOOT_HEX) verify" \
+		-c "program $(MAIN_HEX) verify" \
+		-c "reset run; exit"
 
 clean:
 	@rm -rf build

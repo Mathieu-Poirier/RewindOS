@@ -6,6 +6,7 @@
 #include "../../include/clock.h"
 #include "../../include/stdint.h"
 #include "../../include/scheduler.h"
+#include "../../include/console.h"
 #include "../../include/terminal.h"
 #include "../../include/sd_task.h"
 #include "../../include/panic.h"
@@ -31,6 +32,10 @@ int main(void)
         sd_async_init();
 
         sched_init(&sched, idle_hook);
+        if (console_task_register(&sched) != SCHED_OK)
+        {
+                PANIC("console task init failed");
+        }
         if (terminal_task_register(&sched) != SCHED_OK)
         {
                 PANIC("terminal task init failed");

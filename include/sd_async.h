@@ -15,6 +15,7 @@ typedef struct {
     volatile sd_operation_t operation;
     volatile drv_status_t   status;
     volatile int32_t        error_code;
+    volatile uint32_t       error_detail;  /* SDMMC_STA value on error */
 
     volatile uint32_t  lba;
     volatile uint32_t  total_blocks;

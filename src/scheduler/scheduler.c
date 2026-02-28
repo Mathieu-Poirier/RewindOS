@@ -198,6 +198,7 @@ int sched_register_task(scheduler_t *s, const task_spec_t *spec)
     ao->flags = AO_FLAG_ACCEPT_EVENTS;
     ao->rtc_max_ticks = spec->rtc_budget_ticks;
     ao->events_handled = 0;
+    ao->name = spec->name;
 
     return sched_register(s, ao);
 }

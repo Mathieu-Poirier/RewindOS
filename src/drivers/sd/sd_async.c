@@ -3,9 +3,9 @@
 #include "../../../include/panic.h"
 
 #define SDMMC_BASE      0x40012C00
+#define SDMMC_DCTRL     (*(volatile uint32_t *)(SDMMC_BASE + 0x2C))
 #define SDMMC_DTIMER    (*(volatile uint32_t *)(SDMMC_BASE + 0x24))
 #define SDMMC_DLEN      (*(volatile uint32_t *)(SDMMC_BASE + 0x28))
-#define SDMMC_DCTRL     (*(volatile uint32_t *)(SDMMC_BASE + 0x2C))
 #define SDMMC_STA       (*(volatile uint32_t *)(SDMMC_BASE + 0x34))
 #define SDMMC_ICR       (*(volatile uint32_t *)(SDMMC_BASE + 0x38))
 #define SDMMC_MASK      (*(volatile uint32_t *)(SDMMC_BASE + 0x3C))
@@ -28,6 +28,9 @@
 #define SDMMC_DCTRL_DTDIR           (1 << 1)
 #define SDMMC_DCTRL_DBLOCKSIZE_512  (9 << 4)
 #define SDMMC_DCTRL_READ            (SDMMC_DCTRL_DBLOCKSIZE_512 | SDMMC_DCTRL_DTDIR | SDMMC_DCTRL_DTEN)
+
+#define SDMMC_CLKCR     (*(volatile uint32_t *)(SDMMC_BASE + 0x04))
+#define SDMMC_CLKCR_HWFC_EN (1 << 14)
 
 #define SDMMC_DATA_TIMEOUT  1000000
 #define SD_CMD_READ_SINGLE_BLOCK 17
@@ -66,7 +69,19 @@ static int sd_ctx_valid_for_transfer(void)
 
 static void sd_start_single_block_read(uint32_t addr)
 {
+    /* Ensure data path is fully disabled and clean before starting */
+    SDMMC_DCTRL = 0;
     SDMMC_ICR = 0xFFFFFFFF;
+    
+    /* Drain any residual data from FIFO */
+    while (SDMMC_STA & SDMMC_STA_RXDAVL) {
+        (void)SDMMC_FIFO;
+    }
+    
+    /* Ensure hardware flow control is enabled to prevent RXOVERR */
+    SDMMC_CLKCR |= SDMMC_CLKCR_HWFC_EN;
+    
+    /* Now set up the new read operation */
     SDMMC_DTIMER = SDMMC_DATA_TIMEOUT;
     SDMMC_DLEN = SD_BLOCK_SIZE;
     SDMMC_DCTRL = SDMMC_DCTRL_READ;
@@ -92,6 +107,9 @@ void SDMMC1_IRQHandler(void)
         SDMMC_MASK = 0;
 
         g_sd_ctx.status = DRV_ERROR;
+        /* Log the actual SDMMC status that caused the error */
+        g_sd_ctx.error_detail = status;
+        
         if (status & SDMMC_STA_DTIMEOUT) {
             g_sd_ctx.error_code = SD_ERR_TIMEOUT;
         } else if (status & SDMMC_STA_DCRCFAIL) {
@@ -101,18 +119,22 @@ void SDMMC1_IRQHandler(void)
         }
         if (g_sd_sched != 0) {
             PANIC_IF(g_sd_err_sig == 0u, "sd scheduler bound with zero err signal");
-            (void)sched_post_isr(g_sd_sched, g_sd_ao_id,
-                                 &(event_t){ .sig = g_sd_err_sig, .arg0 = (uintptr_t)g_sd_ctx.error_code });
+            int rc = sched_post_isr(g_sd_sched, g_sd_ao_id,
+                                    &(event_t){ .sig = g_sd_err_sig, .arg0 = (uintptr_t)g_sd_ctx.error_code });
+            PANIC_IF(rc != SCHED_OK, "sd irq: failed to post error event");
         }
         return;
     }
 
     if (status & SDMMC_STA_RXFIFOHF) {
-        for (int i = 0; i < 8 && g_sd_ctx.fifo_words_left > 0; i++) {
+        /* Drain at least 16 words when FIFO is half-full */
+        int count = 16;
+        while (count > 0 && g_sd_ctx.fifo_words_left > 0 && (SDMMC_STA & SDMMC_STA_RXDAVL)) {
             uint32_t data = SDMMC_FIFO;
             *((volatile uint32_t *)g_sd_ctx.current_ptr) = data;
             g_sd_ctx.current_ptr += 4;
             g_sd_ctx.fifo_words_left--;
+            count--;
         }
     }
 
@@ -141,8 +163,9 @@ void SDMMC1_IRQHandler(void)
             g_sd_ctx.error_code = SD_OK;
             if (g_sd_sched != 0) {
                 PANIC_IF(g_sd_done_sig == 0u, "sd scheduler bound with zero done signal");
-                (void)sched_post_isr(g_sd_sched, g_sd_ao_id,
-                                     &(event_t){ .sig = g_sd_done_sig });
+                int rc = sched_post_isr(g_sd_sched, g_sd_ao_id,
+                                        &(event_t){ .sig = g_sd_done_sig });
+                PANIC_IF(rc != SCHED_OK, "sd irq: failed to post done event");
             }
         }
     }
@@ -150,9 +173,22 @@ void SDMMC1_IRQHandler(void)
 
 void sd_async_init(void)
 {
+    SDMMC_DCTRL = 0;
+    SDMMC_MASK = 0;
+    SDMMC_ICR = 0xFFFFFFFF;
+    
+    /* Drain any stale data from FIFO */
+    while (SDMMC_STA & SDMMC_STA_RXDAVL) {
+        (void)SDMMC_FIFO;
+    }
+    
+    nvic_disable_irq(SDMMC1_IRQn);
+    nvic_clear_pending(SDMMC1_IRQn);
+    
     g_sd_ctx.operation = SD_OP_NONE;
     g_sd_ctx.status = DRV_IDLE;
     g_sd_ctx.error_code = SD_OK;
+    g_sd_ctx.error_detail = 0;
     g_sd_ctx.lba = 0;
     g_sd_ctx.total_blocks = 0;
     g_sd_ctx.blocks_done = 0;

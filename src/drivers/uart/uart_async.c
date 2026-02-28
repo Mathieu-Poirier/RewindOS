@@ -26,6 +26,9 @@ uart_context_t g_uart_ctx;
 static scheduler_t *g_uart_sched;
 static uint8_t g_uart_ao_id;
 static uint16_t g_uart_rx_sig;
+static scheduler_t *g_uart_tx_sched;
+static uint8_t g_uart_tx_ao_id;
+static uint16_t g_uart_tx_sig;
 
 static int uart_ctx_valid(void)
 {
@@ -93,6 +96,11 @@ void USART6_IRQHandler(void)
         USART6_ICR = USART_ICR_TCCF;
         USART6_CR1 &= ~USART_CR1_TCIE;
         g_uart_ctx.tx_status = DRV_IDLE;
+        if (g_uart_tx_sched != 0) {
+            PANIC_IF(g_uart_tx_sig == 0u, "uart tx notifier zero signal");
+            (void)sched_post_isr(g_uart_tx_sched, g_uart_tx_ao_id,
+                                 &(event_t){ .sig = g_uart_tx_sig });
+        }
     }
 }
 
@@ -115,6 +123,9 @@ void uart_async_init(void)
     g_uart_sched = 0;
     g_uart_ao_id = 0;
     g_uart_rx_sig = 0;
+    g_uart_tx_sched = 0;
+    g_uart_tx_ao_id = 0;
+    g_uart_tx_sig = 0;
 
     USART6_CR1 |= USART_CR1_RXNEIE;
 
@@ -255,4 +266,25 @@ int uart_async_rx_event_finish(void)
     nvic_enable_irq(USART6_IRQn);
 
     return still_pending;
+}
+
+void uart_async_bind_tx_notifier(scheduler_t *sched, uint8_t ao_id, uint16_t tx_sig)
+{
+    PANIC_IF(sched == 0, "uart tx bind null scheduler");
+    PANIC_IF(tx_sig == 0u, "uart tx bind zero signal");
+
+    nvic_disable_irq(USART6_IRQn);
+    g_uart_tx_sched = sched;
+    g_uart_tx_ao_id = ao_id;
+    g_uart_tx_sig = tx_sig;
+    nvic_enable_irq(USART6_IRQn);
+}
+
+void uart_async_unbind_tx_notifier(void)
+{
+    nvic_disable_irq(USART6_IRQn);
+    g_uart_tx_sched = 0;
+    g_uart_tx_ao_id = 0;
+    g_uart_tx_sig = 0;
+    nvic_enable_irq(USART6_IRQn);
 }

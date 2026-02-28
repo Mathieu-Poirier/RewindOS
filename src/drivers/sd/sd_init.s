@@ -33,6 +33,7 @@
 
 .equ SDMMC_CLKCR_CLKEN, (1 << 8)
 .equ SDMMC_CLKCR_WIDBUS_4, (1 << 11)
+.equ SDMMC_CLKCR_HWFC_EN, (1 << 14)
 
 .equ SD_CMD_GO_IDLE_STATE, 0
 .equ SD_CMD_ALL_SEND_CID, 2
@@ -326,6 +327,7 @@ bus_width_done:
     orr r6, r6, #SDMMC_CLKCR_WIDBUS_4
 clk_apply:
     orr r6, r6, #SDMMC_CLKCR_CLKEN
+    orr r6, r6, #SDMMC_CLKCR_HWFC_EN
     str r6, [r5]
 
     ldrb r5, [r4, #SD_INFO_HIGH_CAPACITY]

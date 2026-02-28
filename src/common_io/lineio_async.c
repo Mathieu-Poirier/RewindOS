@@ -1,11 +1,12 @@
 #include "../../include/lineio_async.h"
 #include "../../include/uart_async.h"
+#include "../../include/console.h"
 
 static void erase_one(void)
 {
-    uart_async_putc('\b');
-    uart_async_putc(' ');
-    uart_async_putc('\b');
+    console_putc('\b');
+    console_putc(' ');
+    console_putc('\b');
 }
 
 void shell_state_init(shell_state_t *state, const char *prompt_str)
@@ -13,7 +14,7 @@ void shell_state_init(shell_state_t *state, const char *prompt_str)
     state->len = 0;
     state->prompt_str = prompt_str;
     state->escape_state = 0;
-    uart_async_puts(prompt_str);
+    console_puts(prompt_str);
 }
 
 int shell_tick(shell_state_t *state, line_dispatch_fn dispatch)
@@ -43,11 +44,10 @@ int shell_tick(shell_state_t *state, line_dispatch_fn dispatch)
     }
 
     if (c == '\r' || c == '\n') {
-        uart_async_puts("\r\n");
+        console_puts("\r\n");
         state->line[state->len] = '\0';
         dispatch(state->line);
         state->len = 0;
-        uart_async_puts(state->prompt_str);
         return 1;
     }
 
@@ -62,9 +62,9 @@ int shell_tick(shell_state_t *state, line_dispatch_fn dispatch)
     if ((unsigned char)c >= 0x20 && (unsigned char)c <= 0x7E) {
         if (state->len < (SHELL_LINE_MAX - 1)) {
             state->line[state->len++] = (char)c;
-            uart_async_putc((char)c);
+            console_putc((char)c);
         } else {
-            uart_async_putc('\a');
+            console_putc('\a');
         }
     }
 
