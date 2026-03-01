@@ -130,11 +130,10 @@ static void sd_task_on_done(void)
     }
 
     if (g_sd_task_ctx.bg) {
-        console_puts("[done: ");
-        console_puts(g_sd_task_ctx.op == SD_TASK_OP_TEST ? "sdtest" : "sdread");
-        console_puts("]\r\n");
+        ui_notify_bg_done(g_sd_task_ctx.op == SD_TASK_OP_TEST ? "sdtest" : "sdread");
+    } else {
+        sd_task_request_prompt();
     }
-    sd_task_request_prompt();
 }
 
 static void sd_task_on_error(int32_t err)
@@ -161,11 +160,10 @@ static void sd_task_on_error(int32_t err)
     sd_out_puts("\r\n");
 
     if (g_sd_task_ctx.bg) {
-        console_puts("[done: ");
-        console_puts(g_sd_task_ctx.op == SD_TASK_OP_TEST ? "sdtest" : "sdread");
-        console_puts("]\r\n");
+        ui_notify_bg_done(g_sd_task_ctx.op == SD_TASK_OP_TEST ? "sdtest" : "sdread");
+    } else {
+        sd_task_request_prompt();
     }
-    sd_task_request_prompt();
 }
 
 static int sd_task_start_read(uint32_t lba, uint32_t count)
@@ -203,9 +201,10 @@ static void sd_task_dispatch(ao_t *self, const event_t *e)
             sd_out_put_s32(rc);
             sd_out_puts("\r\n");
             if (g_sd_task_ctx.bg) {
-                console_puts("[done: sdread]\r\n");
+                ui_notify_bg_done("sdread");
+            } else {
+                sd_task_request_prompt();
             }
-            sd_task_request_prompt();
         }
         return;
     }
@@ -230,9 +229,10 @@ static void sd_task_dispatch(ao_t *self, const event_t *e)
             sd_out_put_s32(rc);
             sd_out_puts("\r\n");
             if (g_sd_task_ctx.bg) {
-                console_puts("[done: sdtest]\r\n");
+                ui_notify_bg_done("sdtest");
+            } else {
+                sd_task_request_prompt();
             }
-            sd_task_request_prompt();
             return;
         }
 
@@ -249,9 +249,10 @@ static void sd_task_dispatch(ao_t *self, const event_t *e)
             sd_out_put_s32(rc);
             sd_out_puts("\r\n");
             if (g_sd_task_ctx.bg) {
-                console_puts("[done: sdtest]\r\n");
+                ui_notify_bg_done("sdtest");
+            } else {
+                sd_task_request_prompt();
             }
-            sd_task_request_prompt();
         }
         return;
     }

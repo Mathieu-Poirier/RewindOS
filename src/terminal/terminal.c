@@ -6,6 +6,7 @@
 #include "../../include/sd.h"
 #include "../../include/sd_async.h"
 #include "../../include/sd_task.h"
+#include "../../include/counter_task.h"
 #include "../../include/console.h"
 #include "../../include/log.h"
 #include "../../include/cmd_context.h"
@@ -14,14 +15,20 @@
 #include "../../include/task_ids.h"
 #include "../../include/task_signals.h"
 #include "../../include/shutdown.h"
+#include "../../include/terminal.h"
 #include "../../include/panic.h"
 
 #define MAX_ARGUMENTS 8
 #define TICKS_PER_SEC 1000u
 #define CMD_MAILBOX_CAP 8u
+#define TERM_STDIN_OWNER_NONE 0xFFu
+#define TERM_SHORTCUT_CTRL_C 0x03
 
 typedef struct {
         shell_state_t shell;
+        uint8_t stdin_owner;
+        uint8_t stdin_mode;
+        const ao_t *stdin_owner_ref;
 } terminal_task_ctx_t;
 
 static terminal_task_ctx_t g_term_ctx;
@@ -36,6 +43,19 @@ typedef struct {
 static event_t g_cmd_queue_storage[8];
 static cmd_slot_t g_cmd_slots[CMD_MAILBOX_CAP];
 static uint8_t g_cmd_alloc_cursor;
+
+void ui_notify_bg_done(const char *name)
+{
+        if (name == 0 || name[0] == '\0')
+                name = "?";
+
+        console_puts("\r\n[done: ");
+        console_puts(name);
+        console_puts("]\r\n");
+        console_puts(g_term_ctx.shell.prompt_str);
+        if (g_term_ctx.shell.len > 0u)
+                console_write(g_term_ctx.shell.line, (uint16_t)g_term_ctx.shell.len);
+}
 
 static void uart_put_s32(int v)
 {
@@ -142,6 +162,119 @@ static void cmd_slot_release(uint8_t idx)
         g_cmd_slots[idx].used = 0u;
 }
 
+static int term_is_protected_task(uint8_t ao_id)
+{
+        return (ao_id == AO_TERMINAL || ao_id == AO_CMD || ao_id == AO_CONSOLE);
+}
+
+static int term_stdin_owner_valid(void)
+{
+        if (g_sched == 0)
+                return 0;
+        if (g_term_ctx.stdin_owner == TERM_STDIN_OWNER_NONE)
+                return 0;
+        if (g_term_ctx.stdin_owner >= SCHED_MAX_AO)
+                return 0;
+        if (g_sched->table[g_term_ctx.stdin_owner] == 0)
+                return 0;
+        if (g_term_ctx.stdin_owner_ref == 0)
+                return 0;
+        return g_sched->table[g_term_ctx.stdin_owner] == g_term_ctx.stdin_owner_ref;
+}
+
+static void term_stdin_release_internal(void)
+{
+        g_term_ctx.stdin_owner = TERM_STDIN_OWNER_NONE;
+        g_term_ctx.stdin_mode = 0u;
+        g_term_ctx.stdin_owner_ref = 0;
+}
+
+static int term_kill_task(uint8_t ao_id, const char **out_name)
+{
+        if (g_sched == 0 || ao_id >= SCHED_MAX_AO)
+                return SCHED_ERR_PARAM;
+        if (term_is_protected_task(ao_id))
+                return SCHED_ERR_DISABLED;
+        if (g_sched->table[ao_id] == 0)
+                return SCHED_ERR_NOT_FOUND;
+
+        const char *name = g_sched->table[ao_id]->name;
+        int rc = sched_unregister(g_sched, ao_id);
+        if (rc == SCHED_OK && g_term_ctx.stdin_owner == ao_id)
+        {
+                term_stdin_release_internal();
+        }
+
+        if (out_name)
+                *out_name = name;
+        return rc;
+}
+
+static int term_find_task_id(const char *selector, uint8_t *out_id)
+{
+        uint32_t id = 0u;
+        if (parse_u32(selector, &id))
+        {
+                if (id >= SCHED_MAX_AO)
+                        return 0;
+                if (g_sched->table[id] == 0)
+                        return 0;
+                *out_id = (uint8_t)id;
+                return 1;
+        }
+
+        for (uint8_t i = 0u; i < SCHED_MAX_AO; i++)
+        {
+                const ao_t *ao = g_sched->table[i];
+                if (ao == 0 || ao->name == 0)
+                        continue;
+                if (streq(ao->name, selector))
+                {
+                        *out_id = i;
+                        return 1;
+                }
+        }
+
+        return 0;
+}
+
+int terminal_stdin_acquire(uint8_t owner_ao, uint8_t mode)
+{
+        if (g_sched == 0 || owner_ao >= SCHED_MAX_AO)
+                return SCHED_ERR_PARAM;
+        if (mode != TERM_STDIN_MODE_RAW)
+                return SCHED_ERR_PARAM;
+        if (g_sched->table[owner_ao] == 0)
+                return SCHED_ERR_NOT_FOUND;
+        if (term_is_protected_task(owner_ao))
+                return SCHED_ERR_DISABLED;
+        if (g_term_ctx.stdin_owner != TERM_STDIN_OWNER_NONE)
+                return SCHED_ERR_EXISTS;
+
+        g_term_ctx.stdin_owner = owner_ao;
+        g_term_ctx.stdin_mode = mode;
+        g_term_ctx.stdin_owner_ref = g_sched->table[owner_ao];
+        shell_rx_idle(&g_term_ctx.shell);
+        return SCHED_OK;
+}
+
+int terminal_stdin_release(uint8_t owner_ao)
+{
+        if (g_sched == 0 || owner_ao >= SCHED_MAX_AO)
+                return SCHED_ERR_PARAM;
+        if (g_term_ctx.stdin_owner == TERM_STDIN_OWNER_NONE)
+                return SCHED_ERR_NOT_FOUND;
+        if (g_term_ctx.stdin_owner != owner_ao)
+                return SCHED_ERR_PARAM;
+        if (!term_stdin_owner_valid())
+                return SCHED_ERR_NOT_FOUND;
+
+        term_stdin_release_internal();
+        shell_rx_idle(&g_term_ctx.shell);
+        (void)sched_post(g_sched, AO_TERMINAL, &(event_t){ .sig = TERM_SIG_REPRINT_PROMPT });
+        return SCHED_OK;
+}
+
 /* ---- command executor ---------------------------------------------------- */
 
 static void term_execute(char *line)
@@ -161,6 +294,9 @@ static void term_execute(char *line)
                 console_puts("    uptime            Show uptime\r\n");
                 console_puts("    ticks             Show tick count\r\n");
                 console_puts("    ps                Show active tasks\r\n");
+                console_puts("    kill <task>       Remove task by id or name\r\n");
+                console_puts("    counter [n]       Run simple counter program\r\n");
+                console_puts("    Ctrl-C            Kill foreground input owner\r\n");
                 console_puts("\r\n");
                 console_puts("  SD Card\r\n");
                 console_puts("    sdinit            Initialize SD card\r\n");
@@ -271,6 +407,76 @@ static void term_execute(char *line)
                 return;
         }
 
+        if (streq(argv[0], "kill"))
+        {
+                PANIC_IF(g_sched == 0, "kill: scheduler not bound");
+                if (argc < 2)
+                {
+                        console_puts("usage: kill <task-id|name>\r\n");
+                        return;
+                }
+
+                uint8_t ao_id = 0u;
+                if (!term_find_task_id(argv[1], &ao_id))
+                {
+                        console_puts("kill: task not found\r\n");
+                        return;
+                }
+
+                const char *name = 0;
+                int rc = term_kill_task(ao_id, &name);
+                if (rc != SCHED_OK)
+                {
+                        if (rc == SCHED_ERR_DISABLED)
+                        {
+                                console_puts("kill: protected task\r\n");
+                                return;
+                        }
+                        console_puts("kill: err=");
+                        uart_put_s32(rc);
+                        console_puts("\r\n");
+                        return;
+                }
+
+                console_puts("killed ");
+                if (name && name[0] != '\0')
+                        console_puts(name);
+                else
+                        console_puts("(unnamed)");
+                console_puts(" id=");
+                console_put_u32((uint32_t)ao_id);
+                console_puts("\r\n");
+                return;
+        }
+
+        if (streq(argv[0], "counter"))
+        {
+                uint32_t limit = 10u;
+                if (argc >= 2 && !parse_u32(argv[1], &limit))
+                {
+                        console_puts("counter: bad n\r\n");
+                        return;
+                }
+
+                int rc = counter_task_register(g_sched);
+                if (rc != SCHED_OK)
+                {
+                        console_puts("counter: start err=");
+                        uart_put_s32(rc);
+                        console_puts("\r\n");
+                        return;
+                }
+
+                rc = counter_task_request_start(limit);
+                if (rc != SCHED_OK)
+                {
+                        console_puts("counter: queue err=");
+                        uart_put_s32(rc);
+                        console_puts("\r\n");
+                }
+                return;
+        }
+
         if (streq(argv[0], "md"))
         {
                 if (argc < 2)
@@ -308,6 +514,12 @@ static void term_execute(char *line)
 
         if (streq(argv[0], "sdinit"))
         {
+                sd_detect_init();
+                if (!sd_is_detected())
+                {
+                        console_puts("sd: not present\r\n");
+                        return;
+                }
                 sd_use_pll48(1);
                 sd_set_data_clkdiv(SD_CLKDIV_FAST);
                 int rc = sd_init();
@@ -507,13 +719,89 @@ static void term_enqueue_dispatch(char *line)
         }
 }
 
+static void term_on_fg_shortcut_interrupt(void)
+{
+        if (!term_stdin_owner_valid())
+        {
+                term_stdin_release_internal();
+                console_puts("\r\nstdin owner stale; released\r\n");
+                console_puts(g_term_ctx.shell.prompt_str);
+                return;
+        }
+
+        uint8_t owner = g_term_ctx.stdin_owner;
+        const char *name = 0;
+        int rc = term_kill_task(owner, &name);
+
+        console_puts("^C\r\n");
+        if (rc == SCHED_OK)
+        {
+                console_puts("killed ");
+                if (name && name[0] != '\0')
+                        console_puts(name);
+                else
+                        console_puts("(unnamed)");
+                console_puts("\r\n");
+        }
+        else
+        {
+                console_puts("interrupt: kill err=");
+                uart_put_s32(rc);
+                console_puts("\r\n");
+        }
+        console_puts(g_term_ctx.shell.prompt_str);
+}
+
+static void term_dispatch_owned_input(void)
+{
+        if (!term_stdin_owner_valid())
+        {
+                term_stdin_release_internal();
+                console_puts("\r\nstdin owner stale; released\r\n");
+                console_puts(g_term_ctx.shell.prompt_str);
+                return;
+        }
+
+        int c = uart_async_getc();
+        if (c < 0)
+                return;
+
+        if (g_term_ctx.stdin_mode == TERM_STDIN_MODE_RAW)
+        {
+                if ((uint8_t)c == TERM_SHORTCUT_CTRL_C)
+                {
+                        term_on_fg_shortcut_interrupt();
+                        return;
+                }
+
+                int rc = sched_post(g_sched, g_term_ctx.stdin_owner,
+                                    &(event_t){ .sig = TERM_SIG_STDIN_RAW, .arg0 = (uintptr_t)((uint8_t)c) });
+                if (rc != SCHED_OK)
+                {
+                        if (rc == SCHED_ERR_NOT_FOUND || rc == SCHED_ERR_DISABLED)
+                                term_stdin_release_internal();
+                        console_puts("\r\nstdin dispatch err=");
+                        uart_put_s32(rc);
+                        console_puts("\r\n");
+                        console_puts(g_term_ctx.shell.prompt_str);
+                }
+                return;
+        }
+
+        /* Unknown mode: fail closed by releasing lock back to shell. */
+        term_stdin_release_internal();
+        console_puts("\r\nstdin mode invalid; released\r\n");
+        console_puts(g_term_ctx.shell.prompt_str);
+}
+
 static void terminal_task_dispatch(ao_t *self, const event_t *e)
 {
         (void)self;
         PANIC_IF(e == 0, "terminal dispatch: null event");
 
         if (e->sig == TERM_SIG_REPRINT_PROMPT) {
-                console_puts(g_term_ctx.shell.prompt_str);
+                if (!term_stdin_owner_valid())
+                        console_puts(g_term_ctx.shell.prompt_str);
                 return;
         }
 
@@ -522,9 +810,14 @@ static void terminal_task_dispatch(ao_t *self, const event_t *e)
 
         for (;;) {
                 while (uart_rx_available()) {
-                        shell_tick(&g_term_ctx.shell, term_enqueue_dispatch);
+                        if (!term_stdin_owner_valid())
+                                shell_tick(&g_term_ctx.shell, term_enqueue_dispatch);
+                        else
+                                term_dispatch_owned_input();
                 }
                 if (!uart_async_rx_event_finish()) {
+                        if (!term_stdin_owner_valid())
+                                shell_rx_idle(&g_term_ctx.shell);
                         break;
                 }
         }
@@ -537,6 +830,7 @@ int terminal_task_register(scheduler_t *sched)
 
         g_sched = sched;
         shell_state_init(&g_term_ctx.shell, "rewind> ");
+        term_stdin_release_internal();
         uart_async_bind_scheduler(sched, AO_TERMINAL, TERM_SIG_UART_RX_READY);
 
         task_spec_t spec;
@@ -597,9 +891,9 @@ static void cmd_task_dispatch(ao_t *self, const event_t *e)
         cmd_slot_release(idx);
 
         /* Print prompt after output so it always appears last.
-         * Skip if an async command was dispatched --
-         * the async completion handler will post TERM_SIG_REPRINT_PROMPT. */
-        if (!g_cmd_fg_async && !g_cmd_bg_async)
+         * Foreground async commands defer prompt until completion.
+         * Background async commands return prompt immediately. */
+        if (!g_cmd_fg_async)
                 console_puts(g_term_ctx.shell.prompt_str);
         g_cmd_fg_async = 0u;
 }

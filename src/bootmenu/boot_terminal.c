@@ -55,6 +55,17 @@ static void sd_dump_bytes(const uint8_t *buf, uint32_t count)
                 uart_puts("\r\n");
 }
 
+static int sd_require_present(void)
+{
+        sd_detect_init();
+        if (!sd_is_detected())
+        {
+                uart_puts("sd: not present\r\n");
+                return 0;
+        }
+        return 1;
+}
+
 static void sd_print_info(void)
 {
         const sd_info_t *info = sd_get_info();
@@ -286,6 +297,8 @@ static void boot_dispatch(char *line)
 
         if (streq(argv[0], "sdinit"))
         {
+                if (!sd_require_present())
+                        return;
                 sd_use_pll48(0);
                 sd_set_data_clkdiv(SD_CLKDIV_BOOT);
                 int rc = sd_init();
@@ -419,6 +432,8 @@ static void boot_dispatch(char *line)
 
         if (streq(argv[0], "sdtest"))
         {
+                if (!sd_require_present())
+                        return;
                 uart_puts("sdtest: initializing...\r\n");
                 sd_use_pll48(0);
                 sd_set_data_clkdiv(SD_CLKDIV_BOOT);

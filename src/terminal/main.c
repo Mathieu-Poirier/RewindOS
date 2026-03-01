@@ -48,7 +48,6 @@ int main(void)
         {
                 PANIC("sd task init failed");
         }
-
         sched_run(&sched);
         for (;;)
         {

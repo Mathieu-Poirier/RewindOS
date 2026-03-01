@@ -211,6 +211,14 @@ int sched_unregister(scheduler_t *s, uint8_t ao_id)
     if (s->table[ao_id] == 0) {
         return SCHED_ERR_NOT_FOUND;
     }
+    ao_t *ao = s->table[ao_id];
+    eq_drain(&ao->q);
+    ao->flags = 0u;
+    ao->dispatch = 0;
+    ao->state = 0;
+    ao->name = 0;
+    ao->events_handled = 0u;
+    ao->rtc_max_ticks = 0u;
     s->table[ao_id] = 0;
     s->ready_bitmap &= ~(1u << ao_id);
     return SCHED_OK;

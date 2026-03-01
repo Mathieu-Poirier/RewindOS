@@ -34,6 +34,20 @@ void uart_init(uint32_t pclk2_hz, uint32_t baud)
 void uart_putc(char c) { usart6_putc(c); }
 char uart_getc(void) { return usart6_getc(); }
 
+int uart_try_getc(char *out)
+{
+        if (out == 0)
+                return 0;
+
+        volatile uint32_t *USART6_ISR = (volatile uint32_t *)0x4001141Cu;
+        volatile uint8_t  *USART6_RDR = (volatile uint8_t *)0x40011424u;
+        if (((*USART6_ISR) & 0x20u) == 0u) /* RXNE */
+                return 0;
+
+        *out = (char)(*USART6_RDR);
+        return 1;
+}
+
 void uart_puts(const char *s)
 {
         if (!s)

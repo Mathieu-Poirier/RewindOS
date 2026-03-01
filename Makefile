@@ -79,6 +79,7 @@ all: $(BOOT_HEX) $(MAIN_HEX)
 PICOCOM ?= picocom
 TTY ?= /dev/ttyUSB0
 BAUD ?= 115200
+EMAP ?= delbs
 
 .PHONY: connect
 connect:
@@ -86,7 +87,7 @@ connect:
 	@printf 'waiting for %s' $(TTY)
 	@while [ ! -c "$(TTY)" ]; do printf '.'; sleep 0.2; done
 	@printf '\nlaunching %s\n' $(PICOCOM)
-	@$(PICOCOM) -b $(BAUD) $(TTY)
+	@$(PICOCOM) -b $(BAUD) --emap $(EMAP) $(TTY)
 
 # ===== Compile rules =====
 $(BUILD_BOOT)/%.o: src/%.c
