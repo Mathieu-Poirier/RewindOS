@@ -5,5 +5,6 @@ enum {
     AO_SD = 1,
     AO_CMD = 2,
     AO_CONSOLE = 3,
-    AO_COUNTER = 4
+    AO_COUNTER = 4,
+    AO_SNAPSHOT = 5
 };

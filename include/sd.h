@@ -36,8 +36,10 @@ typedef struct sd_info
 
 int sd_init(void);
 int sd_read_blocks(uint32_t lba, uint32_t count, void *buf);
+int sd_write_blocks(uint32_t lba, uint32_t count, const void *buf);
 const sd_info_t *sd_get_info(void);
 int sd_last_error(void);
+int sd_wait_card_ready(void);
 void sd_detect_init(void);
 int sd_is_detected(void);
 uint32_t sd_last_cmd(void);
@@ -48,3 +50,13 @@ void sd_set_data_clkdiv(uint32_t div);
 uint32_t sd_get_data_clkdiv(void);
 void sd_use_pll48(int use_pll);
 int sd_get_use_pll48(void);
+
+/* Lightweight runtime diagnostics for write-path card-ready waits. */
+uint32_t sd_dbg_wait_ready_calls(void);
+uint32_t sd_dbg_wait_ready_ok(void);
+uint32_t sd_dbg_wait_ready_timeout(void);
+uint32_t sd_dbg_wait_ready_cmd_fail_fast(void);
+
+/* Write stage at last failure: 1=wait_ready 2=cmd24 3=fifo 4=dataend 5=ckbusy */
+uint32_t sd_dbg_write_stage(void);
+uint32_t sd_dbg_write_last_sta(void);

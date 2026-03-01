@@ -313,3 +313,16 @@ void sched_run(scheduler_t *s)
         }
     }
 }
+
+void sched_flush_all(scheduler_t *s)
+{
+    if (s == 0) {
+        return;
+    }
+    for (uint32_t i = 0; i < SCHED_MAX_AO; i++) {
+        if (s->table[i] != 0) {
+            eq_drain(&s->table[i]->q);
+        }
+    }
+    s->ready_bitmap = 0u;
+}

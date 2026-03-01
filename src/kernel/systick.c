@@ -2,6 +2,7 @@
 #include "../../include/stdint.h"
 #include "../../include/uart.h"
 #include "../../include/counter_task.h"
+#include "../../include/snapshot_task.h"
 
 volatile uint32_t g_ticks = 0;
 
@@ -9,6 +10,7 @@ void SysTick_Handler(void)
 {
         g_ticks++;
         counter_task_systick_hook();
+        snapshot_task_systick_hook();
 }
 
 uint32_t systick_now(void){

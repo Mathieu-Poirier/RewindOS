@@ -7,9 +7,11 @@
 #include "../../include/sd_async.h"
 #include "../../include/sd_task.h"
 #include "../../include/counter_task.h"
+#include "../../include/snapshot_task.h"
 #include "../../include/console.h"
 #include "../../include/log.h"
 #include "../../include/cmd_context.h"
+#include "../../include/journal.h"
 #include "../../include/scheduler.h"
 #include "../../include/task_spec.h"
 #include "../../include/task_ids.h"
@@ -255,6 +257,7 @@ int terminal_stdin_acquire(uint8_t owner_ao, uint8_t mode)
         g_term_ctx.stdin_mode = mode;
         g_term_ctx.stdin_owner_ref = g_sched->table[owner_ao];
         shell_rx_idle(&g_term_ctx.shell);
+        (void)journal_capture_io_owner(owner_ao, 1u);
         return SCHED_OK;
 }
 
@@ -271,6 +274,7 @@ int terminal_stdin_release(uint8_t owner_ao)
 
         term_stdin_release_internal();
         shell_rx_idle(&g_term_ctx.shell);
+        (void)journal_capture_io_owner(owner_ao, 0u);
         (void)sched_post(g_sched, AO_TERMINAL, &(event_t){ .sig = TERM_SIG_REPRINT_PROMPT });
         return SCHED_OK;
 }
@@ -296,6 +300,9 @@ static void term_execute(char *line)
                 console_puts("    ps                Show active tasks\r\n");
                 console_puts("    kill <task>       Remove task by id or name\r\n");
                 console_puts("    counter [n]       Run simple counter program\r\n");
+                console_puts("    snapnow           Trigger snapshot now\r\n");
+                console_puts("    snapstat          Show snapshot task status\r\n");
+                console_puts("    snapls            List snapshot slots + target\r\n");
                 console_puts("    Ctrl-C            Kill foreground input owner\r\n");
                 console_puts("\r\n");
                 console_puts("  SD Card\r\n");
@@ -339,6 +346,24 @@ static void term_execute(char *line)
                 }
                 uart_puts("rebooting...\r\n");
                 uart_flush_tx();
+
+                /* Quiesce the SD card so the next boot finds it in a
+                 * clean state.  Disable SDMMC IRQ, stop the data path,
+                 * and wait for the card to return to TRAN. */
+                __asm__ volatile("cpsid i" ::: "memory");
+                {
+                        extern void nvic_disable_irq(uint32_t);
+                        extern void nvic_clear_pending(uint32_t);
+                        nvic_disable_irq(49u);   /* SDMMC1_IRQn */
+                        nvic_clear_pending(49u);
+                        volatile uint32_t *SDMMC_MASK  = (uint32_t *)0x40012C3Cu;
+                        volatile uint32_t *SDMMC_DCTRL = (uint32_t *)0x40012C2Cu;
+                        volatile uint32_t *SDMMC_ICR   = (uint32_t *)0x40012C38u;
+                        *SDMMC_MASK  = 0u;
+                        *SDMMC_DCTRL = 0u;
+                        *SDMMC_ICR   = 0xFFFFFFFFu;
+                        (void)sd_wait_card_ready();
+                }
 
                 volatile uint32_t *AIRCR = (uint32_t *)0xE000ED0Cu;
                 const uint32_t VECTKEY = 0x5FAu << 16;
@@ -472,6 +497,76 @@ static void term_execute(char *line)
                 {
                         console_puts("counter: queue err=");
                         uart_put_s32(rc);
+                        console_puts("\r\n");
+                }
+                return;
+        }
+
+        if (streq(argv[0], "snapnow"))
+        {
+                int rc = snapshot_task_request_now();
+                if (rc != SCHED_OK)
+                {
+                        console_puts("snapnow: err=");
+                        uart_put_s32(rc);
+                        console_puts("\r\n");
+                }
+                return;
+        }
+
+        if (streq(argv[0], "snapstat"))
+        {
+                snapshot_task_stats_t st;
+                snapshot_task_get_stats(&st);
+                console_puts("snapshot enabled=");
+                console_put_u32(st.enabled);
+                console_puts(" busy=");
+                console_put_u32(st.busy);
+                console_puts(" restore_mode=");
+                console_put_u32(st.restore_mode);
+                console_puts(" restore_candidate=");
+                console_put_u32(st.restore_has_candidate);
+                console_puts(" interval_s=");
+                console_put_u32(st.interval_s);
+                console_puts("\r\n");
+                console_puts("restore slot=");
+                console_put_u32(st.restore_slot);
+                console_puts(" seq=");
+                console_put_u32(st.restore_seq);
+                console_puts("\r\n");
+                console_puts("last err=");
+                uart_put_s32(st.last_err);
+                console_puts(" slot=");
+                console_put_u32(st.last_slot);
+                console_puts(" seq=");
+                console_put_u32(st.last_seq);
+                console_puts("\r\n");
+                console_puts("last capture_tick=");
+                console_put_u32(st.last_capture_tick);
+                console_puts(" ready_bitmap=0x");
+                console_put_hex32(st.last_ready_bitmap);
+                console_puts("\r\n");
+                console_puts("totals ok=");
+                console_put_u32(st.saves_ok);
+                console_puts(" err=");
+                console_put_u32(st.saves_err);
+                console_puts(" next_tick=");
+                console_put_u32(st.next_tick);
+                console_puts("\r\n");
+                return;
+        }
+
+        if (streq(argv[0], "snapls"))
+        {
+                int rc = snapshot_task_list_slots();
+                if (rc != SCHED_OK)
+                {
+                        console_puts("snapls: err=");
+                        uart_put_s32(rc);
+                        console_puts(" cmd=");
+                        console_put_hex32(sd_last_cmd());
+                        console_puts(" sta=");
+                        console_put_hex32(sd_last_sta());
                         console_puts("\r\n");
                 }
                 return;
@@ -652,10 +747,17 @@ static void term_execute(char *line)
         {
                 extern sd_context_t g_sd_ctx;
                 console_puts("SD Context:\r\n");
+                console_puts("last_error="); uart_put_s32(sd_last_error()); console_puts("\r\n");
+                console_puts("last_cmd=0x"); console_put_hex32(sd_last_cmd()); console_puts("\r\n");
+                console_puts("last_sta=0x"); console_put_hex32(sd_last_sta()); console_puts("\r\n");
                 console_puts("error_code="); uart_put_s32(g_sd_ctx.error_code); console_puts("\r\n");
                 console_puts("error_detail=0x"); console_put_hex32(g_sd_ctx.error_detail); console_puts("\r\n");
                 console_puts("status="); console_put_u32(g_sd_ctx.status); console_puts("\r\n");
                 console_puts("operation="); console_put_u32(g_sd_ctx.operation); console_puts("\r\n");
+                console_puts("wait_ready_calls="); console_put_u32(sd_dbg_wait_ready_calls()); console_puts("\r\n");
+                console_puts("wait_ready_ok="); console_put_u32(sd_dbg_wait_ready_ok()); console_puts("\r\n");
+                console_puts("wait_ready_timeout="); console_put_u32(sd_dbg_wait_ready_timeout()); console_puts("\r\n");
+                console_puts("wait_ready_failfast="); console_put_u32(sd_dbg_wait_ready_cmd_fail_fast()); console_puts("\r\n");
                 if (g_sd_ctx.error_detail) {
                         console_puts("Flags: ");
                         if (g_sd_ctx.error_detail & (1<<1)) console_puts("DCRCFAIL ");
@@ -686,6 +788,17 @@ static void term_enqueue_dispatch(char *line)
         if (g_sched == 0)
         {
                 PANIC("terminal scheduler not bound");
+        }
+
+        /* Skip empty / whitespace-only lines (noise, accidental Enter). */
+        {
+                const char *p = line;
+                while (*p == ' ' || *p == '\t') { p++; }
+                if (*p == '\0')
+                {
+                        console_puts(g_term_ctx.shell.prompt_str);
+                        return;
+                }
         }
 
         int slot = cmd_slot_alloc_copy(line);
@@ -765,6 +878,7 @@ static void term_dispatch_owned_input(void)
         int c = uart_async_getc();
         if (c < 0)
                 return;
+        (void)journal_capture_input_byte((uint8_t)c);
 
         if (g_term_ctx.stdin_mode == TERM_STDIN_MODE_RAW)
         {
@@ -794,14 +908,28 @@ static void term_dispatch_owned_input(void)
         console_puts(g_term_ctx.shell.prompt_str);
 }
 
+void terminal_replay_drain(void)
+{
+        while (uart_rx_available()) {
+                if (!term_stdin_owner_valid())
+                        shell_tick(&g_term_ctx.shell, term_enqueue_dispatch);
+                else
+                        term_dispatch_owned_input();
+        }
+}
+
 static void terminal_task_dispatch(ao_t *self, const event_t *e)
 {
         (void)self;
         PANIC_IF(e == 0, "terminal dispatch: null event");
 
         if (e->sig == TERM_SIG_REPRINT_PROMPT) {
-                if (!term_stdin_owner_valid())
+                if (!term_stdin_owner_valid()) {
                         console_puts(g_term_ctx.shell.prompt_str);
+                        if (g_term_ctx.shell.len > 0u)
+                                console_write(g_term_ctx.shell.line,
+                                              (uint16_t)g_term_ctx.shell.len);
+                }
                 return;
         }
 

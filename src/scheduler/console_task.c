@@ -114,6 +114,14 @@ static void console_task_dispatch(ao_t *self, const event_t *e)
     g_console.wake_posted = 0u;
 }
 
+void console_reset_after_restore(void)
+{
+    g_console.head = 0u;
+    g_console.tail = 0u;
+    g_console.count = 0u;
+    g_console.wake_posted = 0u;
+}
+
 int console_task_register(scheduler_t *sched)
 {
     if (sched == 0) {

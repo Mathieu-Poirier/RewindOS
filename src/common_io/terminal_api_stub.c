@@ -12,3 +12,7 @@ __attribute__((weak)) int terminal_stdin_release(uint8_t owner_ao)
     (void)owner_ao;
     return SCHED_ERR_NOT_FOUND;
 }
+
+__attribute__((weak)) void terminal_replay_drain(void)
+{
+}

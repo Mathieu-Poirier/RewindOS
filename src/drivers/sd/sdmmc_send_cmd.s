@@ -21,7 +21,7 @@
 .equ SDMMC_STA_CMDREND,  (1 << 6)
 .equ SDMMC_STA_CMDSENT,  (1 << 7)
 
-.equ SDMMC_CMD_TIMEOUT, 5000000
+.equ SDMMC_CMD_TIMEOUT, 200000
 
 sdmmc_send_cmd:
     push {r4-r6, lr}

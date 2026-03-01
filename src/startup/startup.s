@@ -137,6 +137,20 @@ Reset_Handler:
     dsb sy
     isb
 
+    /* Resume path is valid only for the main image (APP_BASE=0x08020000). */
+    ldr r0, =g_pfnVectors
+    ldr r1, =0x08020000
+    cmp r0, r1
+    bne 0f
+
+    /* If bootloader marked a snapshot restore handoff, skip C init and resume. */
+    bl rewind_handoff_resume_requested
+    cmp r0, #0
+    beq 0f
+    bl rewind_resume_entry
+    b 4f
+0:
+
     /* Copy .data (FLASH → RAM) */
     ldr r0, =_sidata
     ldr r1, =_sdata

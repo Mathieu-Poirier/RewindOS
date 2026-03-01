@@ -1,6 +1,7 @@
 #include "../../include/lineio_async.h"
 #include "../../include/uart_async.h"
 #include "../../include/console.h"
+#include "../../include/journal.h"
 
 #define EOL_STATE_NONE           0u
 #define EOL_STATE_AFTER_CR       1u
@@ -164,6 +165,7 @@ int shell_tick(shell_state_t *state, line_dispatch_fn dispatch)
     if (c < 0) {
         return 0;
     }
+    (void)journal_capture_input_byte((uint8_t)c);
 
     if (state->eol_state == EOL_STATE_AFTER_CR) {
         if (c == '\n') {

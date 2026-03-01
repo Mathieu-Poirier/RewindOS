@@ -23,6 +23,18 @@ static counter_task_ctx_t g_counter_ctx;
 static event_t g_counter_queue_storage[8];
 static scheduler_t *g_counter_sched;
 
+void counter_task_disarm_hook(void)
+{
+    g_counter_sched = 0;
+}
+
+void counter_task_rearm_hook(scheduler_t *sched)
+{
+    if (sched == 0) return;
+    if (sched->table[AO_COUNTER] == 0) return;
+    g_counter_sched = sched;
+}
+
 static void counter_out_puts(const char *s)
 {
     if (g_counter_ctx.bg) {

@@ -33,6 +33,7 @@ int  uart_async_puts(const char *s);
 int  uart_async_write(const uint8_t *data, uint16_t n);
 int  uart_async_getc(void);
 int  uart_async_read(uint8_t *data, uint16_t max_n);
+int  uart_async_inject_rx(const uint8_t *data, uint16_t n);
 int  uart_tx_done(void);
 int  uart_rx_available(void);
 
@@ -41,5 +42,6 @@ void uart_async_unbind_scheduler(void);
 int  uart_async_rx_event_finish(void);
 void uart_async_bind_tx_notifier(scheduler_t *sched, uint8_t ao_id, uint16_t tx_sig);
 void uart_async_unbind_tx_notifier(void);
+int  uart_async_resume_after_restore(void);
 
 void USART6_IRQHandler(void);

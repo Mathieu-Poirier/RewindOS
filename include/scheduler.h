@@ -61,3 +61,4 @@ int  sched_pause_accept(scheduler_t *s, uint8_t ao_id);
 int  sched_resume_accept(scheduler_t *s, uint8_t ao_id);
 
 void sched_run(scheduler_t *s);
+void sched_flush_all(scheduler_t *s);

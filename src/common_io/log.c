@@ -108,3 +108,39 @@ void log_clear(void)
     g_log_tail  = 0u;
     g_log_count = 0u;
 }
+
+int log_put_s32(int32_t v)
+{
+    if (v < 0) {
+        log_putc('-');
+        /* handle INT32_MIN safely */
+        return log_put_u32((uint32_t)(-(v + 1)) + 1u);
+    }
+    return log_put_u32((uint32_t)v);
+}
+
+/* Strip path down to just the filename for compact output. */
+static const char *log_basename(const char *path)
+{
+    const char *p = path;
+    const char *last = path;
+    while (*p != '\0') {
+        if (*p == '/') {
+            last = p + 1;
+        }
+        p++;
+    }
+    return last;
+}
+
+void log_err(const char *tag, int32_t rc, const char *file, uint32_t line)
+{
+    log_puts(tag);
+    log_puts(": err=");
+    log_put_s32(rc);
+    log_puts(" @");
+    log_puts(log_basename(file));
+    log_putc(':');
+    log_put_u32(line);
+    log_puts("\r\n");
+}

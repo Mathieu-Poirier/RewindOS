@@ -2,6 +2,7 @@
 
 extern int sd_init(void);
 extern int sd_read_blocks(uint32_t lba, uint32_t count, void *buf);
+extern int sd_write_blocks(uint32_t lba, uint32_t count, const void *buf);
 extern const sd_info_t *sd_get_info(void);
 extern int sd_last_error(void);
 extern void sd_detect_init(void);

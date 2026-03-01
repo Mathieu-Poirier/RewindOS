@@ -6,3 +6,5 @@
 int counter_task_register(scheduler_t *sched);
 int counter_task_request_start(uint32_t limit);
 void counter_task_systick_hook(void);
+void counter_task_disarm_hook(void);
+void counter_task_rearm_hook(scheduler_t *sched);

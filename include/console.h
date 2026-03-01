@@ -4,6 +4,7 @@
 #include "scheduler.h"
 
 int console_task_register(scheduler_t *sched);
+void console_reset_after_restore(void);
 
 int console_putc(char c);
 int console_puts(const char *s);

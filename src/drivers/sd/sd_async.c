@@ -32,7 +32,8 @@
 #define SDMMC_CLKCR     (*(volatile uint32_t *)(SDMMC_BASE + 0x04))
 #define SDMMC_CLKCR_HWFC_EN (1 << 14)
 
-#define SDMMC_DATA_TIMEOUT  1000000
+/* Hardware data-timeout: 250 ms at 24 MHz SDMMC_CK */
+#define SDMMC_DATA_TIMEOUT  6000000
 #define SD_CMD_READ_SINGLE_BLOCK 17
 #define SDMMC_CMD_WAITRESP_SHORT (1 << 6)
 
