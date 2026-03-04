@@ -207,6 +207,9 @@ static void main_cold_boot(void)
                                                        &applied, &skipped, &failed);
                 PANIC_IF(rrc != RESTORE_LOADER_OK, "restore loader bootstrap failed");
         }
+        /* Run loader selftest before boot restore so test payloads cannot
+         * overwrite/unregister a successfully restored runtime task. */
+        maybe_run_restore_loader_selftest(&sched);
         if (has_boot_cfg && boot_cfg.boot_restore_enabled)
         {
                 if (sd_is_detected() && sd_get_info()->initialized)

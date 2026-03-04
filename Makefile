@@ -139,10 +139,16 @@ flash: all
 # ===== Convenience target: clean -> debug build -> flash =====
 debug-flash:
 	@$(MAKE) clean
+	@$(MAKE) all RWOS_RESTORE_SELFTEST=0
+	@$(MAKE) flash RWOS_RESTORE_SELFTEST=0
+
+# ===== Explicit selftest build/flash (restore loader selftest enabled) =====
+selftest-flash:
+	@$(MAKE) clean
 	@$(MAKE) all RWOS_RESTORE_SELFTEST=1
 	@$(MAKE) flash RWOS_RESTORE_SELFTEST=1
 
 clean:
 	@rm -rf build
 
-.PHONY: all flash clean connect debug-flash
+.PHONY: all flash clean connect debug-flash selftest-flash
