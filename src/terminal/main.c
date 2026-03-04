@@ -12,6 +12,7 @@
 #include "../../include/panic.h"
 #include "../../include/counter_task.h"
 #include "../../include/restore_registry.h"
+#include "../../include/restore_loader.h"
 
 extern void systick_init(uint32_t ticks);
 
@@ -54,6 +55,15 @@ int main(void)
         if (sd_task_register_restore_descriptor() != SCHED_OK)
         {
                 PANIC("sd restore descriptor init failed");
+        }
+        /* No-op restore path wiring: real SD-backed regions will be passed here later. */
+        {
+                uint32_t applied = 0u, skipped = 0u, failed = 0u;
+                int rrc = restore_loader_apply_regions(&sched,
+                                                       0, 0,
+                                                       0, 0,
+                                                       &applied, &skipped, &failed);
+                PANIC_IF(rrc != RESTORE_LOADER_OK, "restore loader bootstrap failed");
         }
         if (console_task_register(&sched) != SCHED_OK)
         {
