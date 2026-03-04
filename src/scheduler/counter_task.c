@@ -5,23 +5,47 @@
 #include "../../include/cmd_context.h"
 #include "../../include/console.h"
 #include "../../include/log.h"
+#include "../../include/restore_registry.h"
 #include "../../include/systick.h"
 #include "../../include/terminal.h"
 
-typedef struct {
-    uint8_t active;
-    uint8_t bg;
-    uint8_t step_pending;
-    uint32_t limit;
-    uint32_t value;
-    uint32_t next_tick;
-} counter_task_ctx_t;
-
 #define COUNTER_STEP_TICKS 250u
 
-static counter_task_ctx_t g_counter_ctx;
+static counter_task_state_t g_counter_ctx;
 static event_t g_counter_queue_storage[8];
 static scheduler_t *g_counter_sched;
+static uint8_t g_counter_state_restored;
+
+void counter_task_reset_state(void)
+{
+    g_counter_ctx.active = 0u;
+    g_counter_ctx.bg = 0u;
+    g_counter_ctx.step_pending = 0u;
+    g_counter_ctx.limit = 0u;
+    g_counter_ctx.value = 0u;
+    g_counter_ctx.next_tick = 0u;
+}
+
+int counter_task_get_state(counter_task_state_t *out)
+{
+    if (out == 0) {
+        return SCHED_ERR_PARAM;
+    }
+    *out = g_counter_ctx;
+    return SCHED_OK;
+}
+
+int counter_task_restore_state(const counter_task_state_t *in)
+{
+    if (in == 0) {
+        return SCHED_ERR_PARAM;
+    }
+    g_counter_ctx = *in;
+    /* Pending queue entries are not checkpointed. Re-arm from timer logic. */
+    g_counter_ctx.step_pending = 0u;
+    g_counter_state_restored = 1u;
+    return SCHED_OK;
+}
 
 static void counter_out_puts(const char *s)
 {
@@ -115,12 +139,10 @@ int counter_task_register(scheduler_t *sched)
     }
 
     g_counter_sched = sched;
-    g_counter_ctx.active = 0u;
-    g_counter_ctx.bg = 0u;
-    g_counter_ctx.step_pending = 0u;
-    g_counter_ctx.limit = 0u;
-    g_counter_ctx.value = 0u;
-    g_counter_ctx.next_tick = 0u;
+    if (!g_counter_state_restored) {
+        counter_task_reset_state();
+    }
+    g_counter_state_restored = 0u;
 
     task_spec_t spec;
     spec.id = AO_COUNTER;
@@ -185,7 +207,7 @@ void counter_task_systick_hook(void)
     if (!g_counter_ctx.active || g_counter_ctx.step_pending) {
         return;
     }
-    if ((int32_t)(g_ticks - g_counter_ctx.next_tick) < 0) {
+    if ((int32_t)(systick_now() - g_counter_ctx.next_tick) < 0) {
         return;
     }
 
@@ -193,4 +215,48 @@ void counter_task_systick_hook(void)
                        &(event_t){ .sig = COUNTER_SIG_STEP }) == SCHED_OK) {
         g_counter_ctx.step_pending = 1u;
     }
+}
+
+static int counter_restore_register_fn(scheduler_t *sched, const launch_intent_t *intent)
+{
+    (void)intent;
+    return counter_task_register(sched);
+}
+
+static int counter_restore_get_state_fn(void *out, uint32_t *io_len)
+{
+    counter_task_state_t *state = (counter_task_state_t *)out;
+    if (out == 0 || io_len == 0) {
+        return SCHED_ERR_PARAM;
+    }
+    if (*io_len < sizeof(counter_task_state_t)) {
+        return SCHED_ERR_PARAM;
+    }
+    *io_len = (uint32_t)sizeof(counter_task_state_t);
+    return counter_task_get_state(state);
+}
+
+static int counter_restore_apply_state_fn(const void *blob, uint32_t len)
+{
+    const counter_task_state_t *state = (const counter_task_state_t *)blob;
+    if (blob == 0 || len != sizeof(counter_task_state_t)) {
+        return SCHED_ERR_PARAM;
+    }
+    return counter_task_restore_state(state);
+}
+
+int counter_task_register_restore_descriptor(void)
+{
+    static const restore_task_descriptor_t desc = {
+        .task_id = AO_COUNTER,
+        .task_class = TASK_CLASS_RESTORABLE_NOW,
+        .state_version = 1u,
+        .min_state_len = sizeof(counter_task_state_t),
+        .max_state_len = sizeof(counter_task_state_t),
+        .register_fn = counter_restore_register_fn,
+        .get_state_fn = counter_restore_get_state_fn,
+        .restore_fn = counter_restore_apply_state_fn,
+        .ui_rehydrate_fn = 0
+    };
+    return restore_registry_register_descriptor(&desc);
 }

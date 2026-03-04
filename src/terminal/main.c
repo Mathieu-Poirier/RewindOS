@@ -10,6 +10,8 @@
 #include "../../include/terminal.h"
 #include "../../include/sd_task.h"
 #include "../../include/panic.h"
+#include "../../include/counter_task.h"
+#include "../../include/restore_registry.h"
 
 extern void systick_init(uint32_t ticks);
 
@@ -32,6 +34,11 @@ int main(void)
         sd_async_init();
 
         sched_init(&sched, idle_hook);
+        restore_registry_init();
+        if (counter_task_register_restore_descriptor() != SCHED_OK)
+        {
+                PANIC("counter restore descriptor init failed");
+        }
         if (console_task_register(&sched) != SCHED_OK)
         {
                 PANIC("console task init failed");
