@@ -5,6 +5,8 @@
 
 int terminal_task_register(scheduler_t *sched);
 int cmd_task_register(scheduler_t *sched);
+int terminal_task_register_restore_descriptor(void);
+int cmd_task_register_restore_descriptor(void);
 
 #define TERM_STDIN_MODE_RAW 1u
 

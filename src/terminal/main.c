@@ -101,6 +101,22 @@ static void main_cold_boot(void)
         {
                 PANIC("counter restore descriptor init failed");
         }
+        if (console_task_register_restore_descriptor() != SCHED_OK)
+        {
+                PANIC("console restore descriptor init failed");
+        }
+        if (terminal_task_register_restore_descriptor() != SCHED_OK)
+        {
+                PANIC("terminal restore descriptor init failed");
+        }
+        if (cmd_task_register_restore_descriptor() != SCHED_OK)
+        {
+                PANIC("cmd restore descriptor init failed");
+        }
+        if (sd_task_register_restore_descriptor() != SCHED_OK)
+        {
+                PANIC("sd restore descriptor init failed");
+        }
         if (console_task_register(&g_sched_main) != SCHED_OK)
         {
                 PANIC("console task init failed");
