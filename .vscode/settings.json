@@ -1,5 +1,6 @@
 {
         "files.associations": {
                 "stdint.h": "c"
-        }
+        },
+        "makefile.configureOnOpen": false
 }

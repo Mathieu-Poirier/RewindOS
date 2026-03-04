@@ -23,6 +23,7 @@ extern void enable_gpiod(void);
 
 static uint32_t sd_buf_words[SD_BLOCK_SIZE / 4u];
 static uint32_t g_boot_ckpt_interval_ms = 0u;
+static uint32_t g_boot_restore_enabled = 0u;
 
 static void uart_put_s32(int v)
 {
@@ -266,6 +267,7 @@ static void boot_dispatch(char *line)
                 uart_puts("  Boot\r\n");
                 uart_puts("    bootfast          Jump to main firmware\r\n");
                 uart_puts("    ckptint <ms|off>  Set periodic checkpoint interval for next bootfast\r\n");
+                uart_puts("    bootrestore <on|off|status>  Auto-restore latest checkpoint on bootfast\r\n");
                 uart_puts("\r\n");
                 uart_puts("  SD Card\r\n");
                 uart_puts("    sdinit            Initialize SD card\r\n");
@@ -292,6 +294,7 @@ static void boot_dispatch(char *line)
         {
                 boot_handoff_cfg_t cfg;
                 cfg.ckpt_interval_ms = g_boot_ckpt_interval_ms;
+                cfg.boot_restore_enabled = g_boot_restore_enabled;
                 boot_handoff_publish(&cfg);
                 uart_puts("booting...\r\n");
                 uart_flush_tx();
@@ -299,6 +302,30 @@ static void boot_dispatch(char *line)
                 for (;;)
                 {
                 }
+        }
+
+        if (streq(argv[0], "bootrestore"))
+        {
+                if (argc < 2 || streq(argv[1], "status"))
+                {
+                        uart_puts("bootrestore: ");
+                        uart_puts(g_boot_restore_enabled ? "on\r\n" : "off\r\n");
+                        return;
+                }
+                if (streq(argv[1], "on"))
+                {
+                        g_boot_restore_enabled = 1u;
+                        uart_puts("bootrestore: on\r\n");
+                        return;
+                }
+                if (streq(argv[1], "off"))
+                {
+                        g_boot_restore_enabled = 0u;
+                        uart_puts("bootrestore: off\r\n");
+                        return;
+                }
+                uart_puts("usage: bootrestore <on|off|status>\r\n");
+                return;
         }
 
         if (streq(argv[0], "ckptint"))

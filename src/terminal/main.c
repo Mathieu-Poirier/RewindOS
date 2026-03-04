@@ -2,6 +2,7 @@
 #include "../../include/uart.h"
 #include "../../include/uart_async.h"
 #include "../../include/sd_async.h"
+#include "../../include/sd.h"
 #include "../../include/bump.h"
 #include "../../include/clock.h"
 #include "../../include/stdint.h"
@@ -69,10 +70,31 @@ static void maybe_run_restore_loader_selftest(scheduler_t *sched)
 #endif
 }
 
+static void uart_put_s32_main(int v)
+{
+        if (v < 0)
+        {
+                uart_putc('-');
+                uart_put_u32((uint32_t)(-v));
+                return;
+        }
+        uart_put_u32((uint32_t)v);
+}
+
+static int sd_init_for_boot_restore(void)
+{
+        sd_detect_init();
+        if (!sd_is_detected())
+                return 0;
+        sd_use_pll48(1);
+        sd_set_data_clkdiv(SD_CLKDIV_FAST);
+        return sd_init() == SD_OK;
+}
+
 int main(void)
 {
         scheduler_t sched;
-        boot_handoff_cfg_t boot_cfg;
+        boot_handoff_cfg_t boot_cfg = {0};
         uint8_t has_boot_cfg = 0u;
 
         full_clock_init();
@@ -83,6 +105,14 @@ int main(void)
         bump_init();
         uart_async_init();
         sd_async_init();
+        if (sd_init_for_boot_restore())
+        {
+                uart_puts("sdinit: auto ok\r\n");
+        }
+        else
+        {
+                uart_puts("sdinit: auto unavailable\r\n");
+        }
 
         sched_init(&sched, idle_hook);
         has_boot_cfg = (uint8_t)boot_handoff_consume(&boot_cfg);
@@ -115,6 +145,30 @@ int main(void)
                                                        0, 0,
                                                        &applied, &skipped, &failed);
                 PANIC_IF(rrc != RESTORE_LOADER_OK, "restore loader bootstrap failed");
+        }
+        if (has_boot_cfg && boot_cfg.boot_restore_enabled)
+        {
+                if (sd_is_detected() && sd_get_info()->initialized)
+                {
+                        uint32_t applied = 0u, skipped = 0u, failed = 0u, seq = 0u;
+                        int rrc = terminal_ckpt_load_latest_sd(&sched,
+                                                               &applied, &skipped, &failed, &seq);
+                        uart_puts("bootrestore: rc=");
+                        uart_put_s32_main(rrc);
+                        uart_puts(" applied=");
+                        uart_put_u32(applied);
+                        uart_puts(" skipped=");
+                        uart_put_u32(skipped);
+                        uart_puts(" failed=");
+                        uart_put_u32(failed);
+                        uart_puts(" seq=");
+                        uart_put_u32(seq);
+                        uart_puts("\r\n");
+                }
+                else
+                {
+                        uart_puts("bootrestore: sd init failed\r\n");
+                }
         }
         maybe_run_restore_loader_selftest(&sched);
         if (console_task_register(&sched) != SCHED_OK)

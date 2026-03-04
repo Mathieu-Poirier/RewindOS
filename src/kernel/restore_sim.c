@@ -85,6 +85,10 @@ int restore_sim_apply(scheduler_t *sched, uint32_t *out_applied, uint32_t *out_s
     uint16_t remain = g_q.count;
     uint32_t n = 0u;
 
+    /* Keep analyzers happy without pulling in libc memset in freestanding mode. */
+    regions[0].region_id = 0u;
+    payload[0] = 0u;
+
     while (remain > 0u) {
         restore_sim_item_t *it = &g_items[idx];
         uint32_t j;
@@ -100,6 +104,13 @@ int restore_sim_apply(scheduler_t *sched, uint32_t *out_applied, uint32_t *out_s
         }
         idx = (uint16_t)((idx + 1u) % RESTORE_SIM_MAX_ITEMS);
         remain--;
+    }
+
+    if (n == 0u) {
+        if (out_applied) *out_applied = 0u;
+        if (out_skipped) *out_skipped = 0u;
+        if (out_failed) *out_failed = 0u;
+        return RESTORE_LOADER_OK;
     }
 
     {

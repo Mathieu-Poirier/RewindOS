@@ -41,9 +41,23 @@ int counter_task_restore_state(const counter_task_state_t *in)
     if (in == 0) {
         return SCHED_ERR_PARAM;
     }
+    if (!in->active) {
+        counter_task_reset_state();
+        if (g_counter_sched != 0 && g_counter_sched->table[AO_COUNTER] != 0) {
+            (void)sched_unregister(g_counter_sched, AO_COUNTER);
+        }
+        g_counter_state_restored = 0u;
+        return SCHED_OK;
+    }
     g_counter_ctx = *in;
     /* Pending queue entries are not checkpointed. Re-arm from timer logic. */
     g_counter_ctx.step_pending = 0u;
+    if (g_counter_ctx.active) {
+        /* next_tick is absolute to old uptime; after reboot re-arm from now. */
+        g_counter_ctx.next_tick = systick_now() + COUNTER_STEP_TICKS;
+    } else {
+        g_counter_ctx.next_tick = 0u;
+    }
     g_counter_state_restored = 1u;
     return SCHED_OK;
 }
@@ -315,6 +329,11 @@ static int counter_restore_get_state_fn(void *out, uint32_t *io_len)
     if (counter_task_get_state(&state) != SCHED_OK) {
         return SCHED_ERR_PARAM;
     }
+    if (!state.active) {
+        /* Only checkpoint live counter executions; inactive snapshots create
+         * non-resuming zombie registrations on restore. */
+        return SCHED_ERR_NOT_FOUND;
+    }
     return counter_task_encode_restore_envelope(&state, 0, 0, out, io_len);
 }
 
@@ -426,8 +445,22 @@ static int counter_restore_apply_state_fn(const void *blob, uint32_t len)
     if (!have_base_state) {
         return SCHED_ERR_PARAM;
     }
+    if (!temp_state.active) {
+        counter_task_reset_state();
+        if (g_counter_sched != 0 && g_counter_sched->table[AO_COUNTER] != 0) {
+            (void)sched_unregister(g_counter_sched, AO_COUNTER);
+        }
+        g_counter_state_restored = 0u;
+        return SCHED_OK;
+    }
     g_counter_ctx = temp_state;
     g_counter_ctx.step_pending = 0u;
+    if (g_counter_ctx.active) {
+        /* Restore must not keep stale absolute tick values across reboot. */
+        g_counter_ctx.next_tick = systick_now() + COUNTER_STEP_TICKS;
+    } else {
+        g_counter_ctx.next_tick = 0u;
+    }
     counter_out_puts("counter: restore value=");
     counter_out_put_u32(g_counter_ctx.value);
     counter_out_puts(" limit=");

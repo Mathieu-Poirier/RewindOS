@@ -26,3 +26,17 @@ __attribute__((weak)) uint32_t terminal_ckpt_get_interval_ms(void)
 {
     return 0u;
 }
+
+__attribute__((weak)) int terminal_ckpt_load_latest_sd(scheduler_t *sched,
+                                                       uint32_t *out_applied,
+                                                       uint32_t *out_skipped,
+                                                       uint32_t *out_failed,
+                                                       uint32_t *out_seq)
+{
+    (void)sched;
+    if (out_applied) *out_applied = 0u;
+    if (out_skipped) *out_skipped = 0u;
+    if (out_failed) *out_failed = 0u;
+    if (out_seq) *out_seq = 0u;
+    return SCHED_ERR_NOT_FOUND;
+}

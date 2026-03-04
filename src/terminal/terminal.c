@@ -270,6 +270,129 @@ static uint32_t ckpt_meta_size(uint16_t entry_count)
              + ((uint32_t)entry_count * (uint32_t)sizeof(ckpt_lifecycle_entry_t));
 }
 
+static int ckpt_decode_counter_state(const uint8_t *blob, uint32_t len, counter_task_state_t *out)
+{
+        const restorable_envelope_t *env;
+        counter_task_state_t temp_state;
+        uint8_t have_base_state = 0u;
+        uint8_t consumed[RESTORE_ENV_MAX_ENTRIES];
+
+        if (blob == 0 || out == 0)
+                return SCHED_ERR_PARAM;
+
+        if (len == sizeof(counter_task_state_t))
+        {
+                *out = *(const counter_task_state_t *)blob;
+                out->step_pending = 0u;
+                return SCHED_OK;
+        }
+
+        if (len < sizeof(restorable_envelope_t))
+                return SCHED_ERR_PARAM;
+        env = (const restorable_envelope_t *)blob;
+
+        if (env->hdr.magic != RESTORE_ENV_MAGIC || env->hdr.version != RESTORE_ENV_VERSION)
+                return SCHED_ERR_PARAM;
+        if (env->hdr.program_id != AO_COUNTER)
+                return SCHED_ERR_PARAM;
+        if (env->hdr.entry_count == 0u || env->hdr.entry_count > RESTORE_ENV_MAX_ENTRIES)
+                return SCHED_ERR_PARAM;
+        if (env->hdr.read_idx > env->hdr.entry_count || env->hdr.write_idx > env->hdr.entry_count)
+                return SCHED_ERR_PARAM;
+
+        for (uint16_t i = 0u; i < RESTORE_ENV_MAX_ENTRIES; i++)
+                consumed[i] = 0u;
+
+        for (uint16_t i = 0u; i < env->hdr.entry_count; i++)
+        {
+                uint32_t best_seq = 0xFFFFFFFFu;
+                int best_idx = -1;
+
+                for (uint16_t j = 0u; j < env->hdr.entry_count; j++)
+                {
+                        if (consumed[j])
+                                continue;
+                        if (env->entries[j].seq < best_seq)
+                        {
+                                best_seq = env->entries[j].seq;
+                                best_idx = (int)j;
+                        }
+                }
+
+                if (best_idx < 0)
+                        return SCHED_ERR_PARAM;
+                consumed[best_idx] = 1u;
+
+                {
+                        const restorable_envelope_entry_t *e = &env->entries[best_idx];
+                        if (e->entry_state != RESTORE_ENV_ENTRY_PENDING)
+                                continue;
+
+                        if (e->action == COUNTER_RESTORE_ACTION_SET_STATE)
+                        {
+                                if (e->data_len != sizeof(counter_task_state_t))
+                                        return SCHED_ERR_PARAM;
+                                temp_state = *(const counter_task_state_t *)e->data;
+                                temp_state.step_pending = 0u;
+                                have_base_state = 1u;
+                                continue;
+                        }
+
+                        if (e->action == COUNTER_RESTORE_ACTION_APPLY_OP)
+                        {
+                                const counter_restore_op_t *op;
+
+                                if (!have_base_state)
+                                        return SCHED_ERR_PARAM;
+                                if (e->data_len != sizeof(counter_restore_op_t))
+                                        return SCHED_ERR_PARAM;
+                                op = (const counter_restore_op_t *)e->data;
+
+                                if (op->op == COUNTER_RESTORE_OP_ADD)
+                                {
+                                        temp_state.value += op->operand;
+                                }
+                                else if (op->op == COUNTER_RESTORE_OP_SUB)
+                                {
+                                        if (temp_state.value > op->operand)
+                                                temp_state.value -= op->operand;
+                                        else
+                                                temp_state.value = 1u;
+                                }
+                                else if (op->op == COUNTER_RESTORE_OP_MUL)
+                                {
+                                        temp_state.value *= op->operand;
+                                }
+                                else if (op->op == COUNTER_RESTORE_OP_DIV)
+                                {
+                                        if (op->operand == 0u)
+                                                return SCHED_ERR_PARAM;
+                                        temp_state.value /= op->operand;
+                                        if (temp_state.value == 0u)
+                                                temp_state.value = 1u;
+                                }
+                                else
+                                {
+                                        return SCHED_ERR_PARAM;
+                                }
+
+                                if (temp_state.value > temp_state.limit && temp_state.limit != 0u)
+                                        temp_state.value = temp_state.limit;
+                                continue;
+                        }
+
+                        return SCHED_ERR_PARAM;
+                }
+        }
+
+        if (!have_base_state)
+                return SCHED_ERR_PARAM;
+
+        *out = temp_state;
+        out->step_pending = 0u;
+        return SCHED_OK;
+}
+
 static void term_ckpt_preview(void)
 {
         uint32_t running_bitmap = 0u;
@@ -298,6 +421,13 @@ static void term_ckpt_preview(void)
                 exit_tmp[i] = g_ckpt_exit_count[i];
                 if (g_sched->table[i] != 0)
                         running_bitmap |= (1u << i);
+        }
+
+        for (uint32_t i = 0u; i < CKPT_SD_MAX_REGIONS; i++)
+        {
+                items[i].task_id = 0u;
+                items[i].state_version = 0u;
+                items[i].len = 0u;
         }
 
         launched = running_bitmap & ~g_ckpt_running_prev_bitmap;
@@ -593,6 +723,125 @@ static int term_ckptsave_sd_once(uint32_t *out_lba, uint32_t *out_slot, uint32_t
         return SCHED_OK;
 }
 
+static int term_ckpt_load_latest_sd_internal(scheduler_t *sched,
+                                             uint32_t *out_applied,
+                                             uint32_t *out_skipped,
+                                             uint32_t *out_failed,
+                                             uint32_t *out_seq,
+                                             uint32_t *out_lba,
+                                             uint32_t *out_slot)
+{
+        uint32_t blk_words[SD_BLOCK_SIZE / 4u];
+        uint8_t *blk = (uint8_t *)blk_words;
+        uint8_t selected_blk[SD_BLOCK_SIZE];
+        checkpoint_v2_header_t best_hdr;
+        checkpoint_v2_region_t filtered_regions[CKPT_V2_MAX_REGIONS];
+        uint8_t best_found = 0u;
+        uint32_t applied = 0u, skipped = 0u, failed = 0u;
+        uint32_t selected_lba = 0u;
+        int rc = RESTORE_LOADER_ERR_RESTORE;
+
+        best_hdr.seq = 0u;
+        best_hdr.slot_id = 0u;
+        best_hdr.region_count = 0u;
+        best_hdr.active_task_bitmap = 0u;
+
+        if (out_applied) *out_applied = 0u;
+        if (out_skipped) *out_skipped = 0u;
+        if (out_failed) *out_failed = 0u;
+        if (out_seq) *out_seq = 0u;
+        if (out_lba) *out_lba = 0u;
+        if (out_slot) *out_slot = 0u;
+
+        if (sched == 0)
+                return SCHED_ERR_PARAM;
+
+        ckpt_sd_seed_seq_if_needed();
+        for (uint32_t slot = 0u; slot < CKPT_SD_SLOT_COUNT; slot++)
+        {
+                checkpoint_v2_header_t hdr;
+                if (!ckpt_sd_read_valid_slot(slot, &hdr, blk))
+                        continue;
+
+                if (!best_found || hdr.seq > best_hdr.seq)
+                {
+                        best_found = 1u;
+                        best_hdr = hdr;
+                        selected_lba = ckpt_sd_lba_for_slot(slot);
+                        buf_copy(selected_blk, blk, SD_BLOCK_SIZE);
+                }
+        }
+
+        if (!best_found)
+                return SCHED_ERR_NOT_FOUND;
+
+        {
+                const checkpoint_v2_region_t *all_regions =
+                        (const checkpoint_v2_region_t *)(selected_blk + sizeof(checkpoint_v2_header_t));
+                uint16_t filtered_count = 0u;
+                uint32_t meta_off = u32_load_le(&best_hdr.reserved1[0]);
+                uint32_t meta_len = u32_load_le(&best_hdr.reserved1[4]);
+                const ckpt_lifecycle_meta_t *meta = 0;
+
+                if (meta_len >= ckpt_meta_size(0u) && meta_off + meta_len <= SD_BLOCK_SIZE)
+                {
+                        meta = (const ckpt_lifecycle_meta_t *)(selected_blk + meta_off);
+                        if (meta->magic != CKPT_META_MAGIC || meta->version != CKPT_META_VERSION)
+                                meta = 0;
+                        else if (meta->entry_count > best_hdr.region_count)
+                                meta = 0;
+                }
+
+                for (uint16_t i = 0u; i < best_hdr.region_count; i++)
+                {
+                        const checkpoint_v2_region_t *r = &all_regions[i];
+                        uint8_t allow = 1u;
+                        if (meta != 0)
+                        {
+                                for (uint16_t j = 0u; j < meta->entry_count; j++)
+                                {
+                                        if (meta->entries[j].task_id != (uint8_t)r->region_id)
+                                                continue;
+                                        if (meta->entries[j].launch_count <= meta->entries[j].exit_count)
+                                                allow = 0u;
+                                        break;
+                                }
+                        }
+                        if (!allow)
+                                continue;
+                        filtered_regions[filtered_count++] = *r;
+                }
+
+                rc = restore_loader_apply_regions(sched,
+                                                  filtered_regions,
+                                                  filtered_count,
+                                                  selected_blk, SD_BLOCK_SIZE,
+                                                  &applied, &skipped, &failed);
+        }
+
+        g_ckpt_sd_seq = (best_hdr.seq == 0xFFFFFFFFu) ? 1u : (best_hdr.seq + 1u);
+        g_ckpt_sd_seq_seeded = 1u;
+
+        if (out_applied) *out_applied = applied;
+        if (out_skipped) *out_skipped = skipped;
+        if (out_failed) *out_failed = failed;
+        if (out_seq) *out_seq = best_hdr.seq;
+        if (out_lba) *out_lba = selected_lba;
+        if (out_slot) *out_slot = best_hdr.slot_id;
+        return rc;
+}
+
+int terminal_ckpt_load_latest_sd(scheduler_t *sched,
+                                 uint32_t *out_applied,
+                                 uint32_t *out_skipped,
+                                 uint32_t *out_failed,
+                                 uint32_t *out_seq)
+{
+        return term_ckpt_load_latest_sd_internal(sched,
+                                                 out_applied, out_skipped, out_failed, out_seq,
+                                                 0, 0);
+}
+
 void ui_notify_bg_done(const char *name)
 {
         if (name == 0 || name[0] == '\0')
@@ -716,6 +965,8 @@ static int cmd_slot_alloc_copy(const char *line)
 static void cmd_slot_release(uint8_t idx)
 {
         PANIC_IF(idx >= CMD_MAILBOX_CAP, "cmd slot idx out of range");
+        if (idx >= CMD_MAILBOX_CAP)
+                return;
         g_cmd_slots[idx].used = 0u;
 }
 
@@ -1317,81 +1568,15 @@ static void term_execute(char *line)
 
         if (streq(argv[0], "ckptload_sd"))
         {
-                uint32_t blk_words[SD_BLOCK_SIZE / 4u];
-                uint8_t *blk = (uint8_t *)blk_words;
-                uint8_t selected_blk[SD_BLOCK_SIZE];
-                checkpoint_v2_header_t best_hdr;
-                checkpoint_v2_region_t filtered_regions[CKPT_V2_MAX_REGIONS];
-                uint8_t best_found = 0u;
                 uint32_t applied = 0u, skipped = 0u, failed = 0u;
-                uint32_t selected_lba = 0u;
-                int rc = RESTORE_LOADER_ERR_RESTORE;
-
-                ckpt_sd_seed_seq_if_needed();
-
-                for (uint32_t slot = 0u; slot < CKPT_SD_SLOT_COUNT; slot++)
-                {
-                        checkpoint_v2_header_t hdr;
-                        if (!ckpt_sd_read_valid_slot(slot, &hdr, blk))
-                                continue;
-
-                        if (!best_found || hdr.seq > best_hdr.seq)
-                        {
-                                best_found = 1u;
-                                best_hdr = hdr;
-                                selected_lba = ckpt_sd_lba_for_slot(slot);
-                                buf_copy(selected_blk, blk, SD_BLOCK_SIZE);
-                        }
-                }
-
-                if (!best_found)
+                uint32_t seq = 0u, selected_lba = 0u, selected_slot = 0u;
+                int rc = term_ckpt_load_latest_sd_internal(g_sched,
+                                                           &applied, &skipped, &failed, &seq,
+                                                           &selected_lba, &selected_slot);
+                if (rc == SCHED_ERR_NOT_FOUND)
                 {
                         console_puts("ckptload_sd: no valid slot\r\n");
                         return;
-                }
-
-                {
-                        const checkpoint_v2_region_t *all_regions =
-                                (const checkpoint_v2_region_t *)(selected_blk + sizeof(checkpoint_v2_header_t));
-                        uint16_t filtered_count = 0u;
-                        uint32_t meta_off = u32_load_le(&best_hdr.reserved1[0]);
-                        uint32_t meta_len = u32_load_le(&best_hdr.reserved1[4]);
-                        const ckpt_lifecycle_meta_t *meta = 0;
-
-                        if (meta_len >= ckpt_meta_size(0u) && meta_off + meta_len <= SD_BLOCK_SIZE)
-                        {
-                                meta = (const ckpt_lifecycle_meta_t *)(selected_blk + meta_off);
-                                if (meta->magic != CKPT_META_MAGIC || meta->version != CKPT_META_VERSION)
-                                        meta = 0;
-                                else if (meta->entry_count > best_hdr.region_count)
-                                        meta = 0;
-                        }
-
-                        for (uint16_t i = 0u; i < best_hdr.region_count; i++)
-                        {
-                                const checkpoint_v2_region_t *r = &all_regions[i];
-                                uint8_t allow = 1u;
-                                if (meta != 0)
-                                {
-                                        for (uint16_t j = 0u; j < meta->entry_count; j++)
-                                        {
-                                                if (meta->entries[j].task_id != (uint8_t)r->region_id)
-                                                        continue;
-                                                if (meta->entries[j].launch_count <= meta->entries[j].exit_count)
-                                                        allow = 0u;
-                                                break;
-                                        }
-                                }
-                                if (!allow)
-                                        continue;
-                                filtered_regions[filtered_count++] = *r;
-                        }
-
-                rc = restore_loader_apply_regions(g_sched,
-                                                  filtered_regions,
-                                                  filtered_count,
-                                                  selected_blk, SD_BLOCK_SIZE,
-                                                  &applied, &skipped, &failed);
                 }
                 console_puts("ckptload_sd: rc=");
                 uart_put_s32(rc);
@@ -1404,12 +1589,10 @@ static void term_execute(char *line)
                 console_puts(" lba=");
                 console_put_u32(selected_lba);
                 console_puts(" slot=");
-                console_put_u32((uint32_t)best_hdr.slot_id);
+                console_put_u32(selected_slot);
                 console_puts(" seq=");
-                console_put_u32(best_hdr.seq);
+                console_put_u32(seq);
                 console_puts("\r\n");
-                g_ckpt_sd_seq = (best_hdr.seq == 0xFFFFFFFFu) ? 1u : (best_hdr.seq + 1u);
-                g_ckpt_sd_seq_seeded = 1u;
                 return;
         }
 
@@ -1421,6 +1604,11 @@ static void term_execute(char *line)
                 checkpoint_v2_header_t best_hdr;
                 uint8_t best_found = 0u;
                 uint32_t selected_lba = 0u;
+
+                best_hdr.seq = 0u;
+                best_hdr.slot_id = 0u;
+                best_hdr.region_count = 0u;
+                best_hdr.active_task_bitmap = 0u;
 
                 for (uint32_t slot = 0u; slot < CKPT_SD_SLOT_COUNT; slot++)
                 {
@@ -1522,6 +1710,42 @@ static void term_execute(char *line)
                                         console_puts(would_restore ? "yes" : "no");
                                 }
                                 console_puts("\r\n");
+
+                                if ((uint8_t)r->region_id == AO_COUNTER)
+                                {
+                                        counter_task_state_t cst;
+                                        uint32_t end = r->offset + r->length;
+                                        int d_rc;
+
+                                        if (end < r->offset || end > SD_BLOCK_SIZE)
+                                        {
+                                                console_puts("    counter_blob: invalid range off=");
+                                                console_put_u32(r->offset);
+                                                console_puts(" len=");
+                                                console_put_u32(r->length);
+                                                console_puts("\r\n");
+                                                continue;
+                                        }
+
+                                        d_rc = ckpt_decode_counter_state(selected_blk + r->offset, r->length, &cst);
+                                        if (d_rc != SCHED_OK)
+                                        {
+                                                console_puts("    counter_blob: decode rc=");
+                                                uart_put_s32(d_rc);
+                                                console_puts("\r\n");
+                                                continue;
+                                        }
+
+                                        console_puts("    counter_state: active=");
+                                        console_put_u32(cst.active);
+                                        console_puts(" bg=");
+                                        console_put_u32(cst.bg);
+                                        console_puts(" value=");
+                                        console_put_u32(cst.value);
+                                        console_puts(" limit=");
+                                        console_put_u32(cst.limit);
+                                        console_puts("\r\n");
+                                }
                         }
                 }
                 return;
@@ -2220,6 +2444,8 @@ static void terminal_task_dispatch(ao_t *self, const event_t *e)
 {
         (void)self;
         PANIC_IF(e == 0, "terminal dispatch: null event");
+        if (e == 0)
+                return;
 
         if (e->sig == TERM_SIG_CKPT_TIMER) {
                 uint32_t lba = 0u, slot = 0u, seq = 0u, regions = 0u;
@@ -2286,13 +2512,19 @@ static void cmd_task_dispatch(ao_t *self, const event_t *e)
 {
         (void)self;
         PANIC_IF(e == 0, "cmd dispatch: null event");
+        if (e == 0)
+                return;
         if (e->sig != CMD_SIG_EXEC)
                 return;
 
         uint8_t idx    = (uint8_t)e->arg0;
         uint8_t is_bg  = (uint8_t)(e->arg1 & 1u);
         PANIC_IF(idx >= CMD_MAILBOX_CAP, "cmd event idx out of range");
+        if (idx >= CMD_MAILBOX_CAP)
+                return;
         PANIC_IF(g_cmd_slots[idx].used == 0u, "cmd event for free slot");
+        if (g_cmd_slots[idx].used == 0u)
+                return;
 
         /* Snapshot the command name before term_execute may modify the slot. */
         char cmd_name[32];
