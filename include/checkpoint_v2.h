@@ -28,8 +28,8 @@ typedef struct {
     uint8_t reserved0[3];
     uint32_t regions_crc32;
     uint32_t header_crc32;
-    uint8_t reserved1[32];
-} checkpoint_v2_header_t;
+    uint8_t reserved1[28];
+} __attribute__((packed)) checkpoint_v2_header_t;
 
 typedef struct {
     uint16_t region_id;
@@ -37,7 +37,7 @@ typedef struct {
     uint32_t offset;
     uint32_t length;
     uint32_t crc32;
-} checkpoint_v2_region_t;
+} __attribute__((packed)) checkpoint_v2_region_t;
 
 _Static_assert(sizeof(checkpoint_v2_header_t) == 64u, "checkpoint_v2_header_t size must be 64");
 _Static_assert(sizeof(checkpoint_v2_region_t) == 16u, "checkpoint_v2_region_t size must be 16");

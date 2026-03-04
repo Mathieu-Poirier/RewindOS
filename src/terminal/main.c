@@ -10,7 +10,6 @@
 #include "../../include/terminal.h"
 #include "../../include/sd_task.h"
 #include "../../include/snapshot_task.h"
-#include "../../include/counter_task.h"
 #include "../../include/rewind_restore.h"
 #include "../../include/rwfs.h"
 #include "../../include/rwos_disk.h"
@@ -19,6 +18,7 @@
 #include "../../include/panic.h"
 #include "../../include/counter_task.h"
 #include "../../include/restore_registry.h"
+#include "../../include/restore_loader.h"
 
 extern void systick_init(uint32_t ticks);
 extern int uart_async_resume_after_restore(void);
@@ -116,6 +116,15 @@ static void main_cold_boot(void)
         if (sd_task_register_restore_descriptor() != SCHED_OK)
         {
                 PANIC("sd restore descriptor init failed");
+        }
+        /* No-op restore path wiring: real SD-backed regions will be passed here later. */
+        {
+                uint32_t applied = 0u, skipped = 0u, failed = 0u;
+                int rrc = restore_loader_apply_regions(&g_sched_main,
+                                                       0, 0,
+                                                       0, 0,
+                                                       &applied, &skipped, &failed);
+                PANIC_IF(rrc != RESTORE_LOADER_OK, "restore loader bootstrap failed");
         }
         if (console_task_register(&g_sched_main) != SCHED_OK)
         {
