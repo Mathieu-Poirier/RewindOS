@@ -4,7 +4,7 @@
 #include "scheduler.h"
 
 #define RESTORE_SIM_MAX_ITEMS 8u
-#define RESTORE_SIM_MAX_BLOB 256u
+#define RESTORE_SIM_MAX_BLOB 512u
 
 int restore_sim_reset(void);
 int restore_sim_enqueue(uint16_t region_id, uint16_t state_version, const void *blob, uint32_t len);
