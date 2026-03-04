@@ -15,6 +15,7 @@
 #include "../../include/restore_loader.h"
 #include "../../include/checkpoint_v2.h"
 #include "../../include/task_ids.h"
+#include "../../include/boot_handoff.h"
 
 extern void systick_init(uint32_t ticks);
 
@@ -71,6 +72,8 @@ static void maybe_run_restore_loader_selftest(scheduler_t *sched)
 int main(void)
 {
         scheduler_t sched;
+        boot_handoff_cfg_t boot_cfg;
+        uint8_t has_boot_cfg = 0u;
 
         full_clock_init();
         enable_gpio_clock();
@@ -82,6 +85,7 @@ int main(void)
         sd_async_init();
 
         sched_init(&sched, idle_hook);
+        has_boot_cfg = (uint8_t)boot_handoff_consume(&boot_cfg);
         restore_registry_init();
         if (counter_task_register_restore_descriptor() != SCHED_OK)
         {
@@ -124,6 +128,10 @@ int main(void)
         if (cmd_task_register(&sched) != SCHED_OK)
         {
                 PANIC("cmd task init failed");
+        }
+        if (has_boot_cfg)
+        {
+                terminal_ckpt_set_interval_ms(boot_cfg.ckpt_interval_ms);
         }
         if (sd_task_register(&sched) != SCHED_OK)
         {
