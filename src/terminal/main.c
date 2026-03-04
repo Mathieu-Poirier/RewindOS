@@ -20,6 +20,7 @@
 #include "../../include/restore_registry.h"
 #include "../../include/restore_loader.h"
 #include "../../include/checkpoint_v2.h"
+#include "../../include/boot_handoff.h"
 
 extern void systick_init(uint32_t ticks);
 extern int uart_async_resume_after_restore(void);
@@ -124,6 +125,9 @@ static int resume_sched_valid(void)
 
 static void main_cold_boot(void)
 {
+        boot_handoff_cfg_t boot_cfg;
+        uint8_t has_boot_cfg = 0u;
+
         uart_puts("main: cold entry\r\n");
         full_clock_init();
         enable_gpio_clock();
@@ -142,6 +146,7 @@ static void main_cold_boot(void)
 
         sched_init(&g_sched_main, idle_hook);
         uart_puts("main: sched init ok\r\n");
+        has_boot_cfg = (uint8_t)boot_handoff_consume(&boot_cfg);
         restore_registry_init();
         if (counter_task_register_restore_descriptor() != SCHED_OK)
         {
@@ -188,6 +193,10 @@ static void main_cold_boot(void)
                 PANIC("cmd task init failed");
         }
         uart_puts("main: cmd reg ok\r\n");
+        if (has_boot_cfg)
+        {
+                terminal_ckpt_set_interval_ms(boot_cfg.ckpt_interval_ms);
+        }
         if (sd_task_register(&g_sched_main) != SCHED_OK)
         {
                 PANIC("sd task init failed");

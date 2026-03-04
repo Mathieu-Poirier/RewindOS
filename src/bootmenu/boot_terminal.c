@@ -4,6 +4,7 @@
 #include "../include/jump.h"
 #include "../include/sd.h"
 #include "../include/rewind_restore.h"
+#include "../include/boot_handoff.h"
 
 extern void enable_sdmmc1_kerclk_sysclk(void);
 extern void enable_sdmmc1_kerclk_pll48(void);
@@ -220,6 +221,7 @@ static void boot_dispatch(char *line);
 static void boot_menu_print_line(int selected, const char *label, int enabled);
 static int boot_admin_read_best(boot_admin_block_t *out);
 static int boot_ensure_sd_ready(boot_status_t *st);
+static uint32_t g_boot_ckpt_interval_ms = 0u;
 
 static void uart_put_s32(int v)
 {
@@ -2174,6 +2176,7 @@ static void boot_dispatch(char *line)
                 uart_puts("\r\n");
                 uart_puts("  Boot\r\n");
                 uart_puts("    bootfast          Jump to main firmware\r\n");
+                uart_puts("    ckptint <ms|off>  Set periodic checkpoint interval for next bootfast\r\n");
                 uart_puts("\r\n");
                 uart_puts("  SD Card\r\n");
                 uart_puts("    sdinit            Initialize SD card\r\n");
@@ -2203,12 +2206,43 @@ static void boot_dispatch(char *line)
         if (streq(argv[0], "bootfast"))
         {
                 rewind_handoff_clear();
+                boot_handoff_cfg_t cfg;
+                cfg.ckpt_interval_ms = g_boot_ckpt_interval_ms;
+                boot_handoff_publish(&cfg);
                 uart_puts("booting...\r\n");
                 uart_flush_tx();
                 jump_to_image(APP_BASE);
                 for (;;)
                 {
                 }
+        }
+
+        if (streq(argv[0], "ckptint"))
+        {
+                uint32_t ms = 0u;
+                if (argc < 2)
+                {
+                        uart_puts("ckptint=");
+                        uart_put_u32(g_boot_ckpt_interval_ms);
+                        uart_puts(" ms\r\n");
+                        return;
+                }
+                if (streq(argv[1], "off") || streq(argv[1], "0"))
+                {
+                        g_boot_ckpt_interval_ms = 0u;
+                        uart_puts("ckptint: off\r\n");
+                        return;
+                }
+                if (!parse_u32(argv[1], &ms) || ms == 0u)
+                {
+                        uart_puts("usage: ckptint <ms|off>\r\n");
+                        return;
+                }
+                g_boot_ckpt_interval_ms = ms;
+                uart_puts("ckptint: ");
+                uart_put_u32(g_boot_ckpt_interval_ms);
+                uart_puts(" ms\r\n");
+                return;
         }
 
         if (streq(argv[0], "sdinit"))
