@@ -8,6 +8,7 @@
 #include "../../include/log.h"
 #include "../../include/cmd_context.h"
 #include "../../include/panic.h"
+#include "../../include/restore_registry.h"
 
 #define SD_TASK_MAX_BLOCKS 4u
 #define SD_DUMP_BYTES 64u
@@ -344,4 +345,26 @@ int sd_task_request_test(void)
     }
     return sched_post(g_sd_sched, AO_SD,
                       &(event_t){ .sig = SD_SIG_REQ_TEST, .src = (uint16_t)g_cmd_bg_ctx });
+}
+
+static int sd_restore_register_fn(scheduler_t *sched, const launch_intent_t *intent)
+{
+    (void)intent;
+    return sd_task_register(sched);
+}
+
+int sd_task_register_restore_descriptor(void)
+{
+    static const restore_task_descriptor_t desc = {
+        .task_id = AO_SD,
+        .task_class = TASK_CLASS_RESTART_ONLY,
+        .state_version = 0u,
+        .min_state_len = 0u,
+        .max_state_len = 0u,
+        .register_fn = sd_restore_register_fn,
+        .get_state_fn = 0,
+        .restore_fn = 0,
+        .ui_rehydrate_fn = 0
+    };
+    return restore_registry_register_descriptor(&desc);
 }

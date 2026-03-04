@@ -17,6 +17,7 @@
 #include "../../include/shutdown.h"
 #include "../../include/terminal.h"
 #include "../../include/panic.h"
+#include "../../include/restore_registry.h"
 
 #define MAX_ARGUMENTS 8
 #define TICKS_PER_SEC 1000u
@@ -918,4 +919,48 @@ int cmd_task_register(scheduler_t *sched)
         g_cmd_alloc_cursor = 0u;
 
         return sched_register_task(sched, &spec);
+}
+
+static int terminal_restore_register_fn(scheduler_t *sched, const launch_intent_t *intent)
+{
+        (void)intent;
+        return terminal_task_register(sched);
+}
+
+int terminal_task_register_restore_descriptor(void)
+{
+        static const restore_task_descriptor_t desc = {
+                .task_id = AO_TERMINAL,
+                .task_class = TASK_CLASS_RESTART_ONLY,
+                .state_version = 0u,
+                .min_state_len = 0u,
+                .max_state_len = 0u,
+                .register_fn = terminal_restore_register_fn,
+                .get_state_fn = 0,
+                .restore_fn = 0,
+                .ui_rehydrate_fn = 0
+        };
+        return restore_registry_register_descriptor(&desc);
+}
+
+static int cmd_restore_register_fn(scheduler_t *sched, const launch_intent_t *intent)
+{
+        (void)intent;
+        return cmd_task_register(sched);
+}
+
+int cmd_task_register_restore_descriptor(void)
+{
+        static const restore_task_descriptor_t desc = {
+                .task_id = AO_CMD,
+                .task_class = TASK_CLASS_RESTART_ONLY,
+                .state_version = 0u,
+                .min_state_len = 0u,
+                .max_state_len = 0u,
+                .register_fn = cmd_restore_register_fn,
+                .get_state_fn = 0,
+                .restore_fn = 0,
+                .ui_rehydrate_fn = 0
+        };
+        return restore_registry_register_descriptor(&desc);
 }

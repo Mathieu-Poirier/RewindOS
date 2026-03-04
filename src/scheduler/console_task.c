@@ -5,6 +5,7 @@
 #include "../../include/task_spec.h"
 #include "../../include/uart_async.h"
 #include "../../include/panic.h"
+#include "../../include/restore_registry.h"
 
 #define CONSOLE_MSG_SLOTS 64u
 #define CONSOLE_MSG_MAX 96u
@@ -225,4 +226,26 @@ int console_put_hex32(uint32_t v)
         buf[i] = hx[(v >> sh) & 0xFu];
     }
     return console_write(buf, 8u);
+}
+
+static int console_restore_register_fn(scheduler_t *sched, const launch_intent_t *intent)
+{
+    (void)intent;
+    return console_task_register(sched);
+}
+
+int console_task_register_restore_descriptor(void)
+{
+    static const restore_task_descriptor_t desc = {
+        .task_id = AO_CONSOLE,
+        .task_class = TASK_CLASS_RESTART_ONLY,
+        .state_version = 0u,
+        .min_state_len = 0u,
+        .max_state_len = 0u,
+        .register_fn = console_restore_register_fn,
+        .get_state_fn = 0,
+        .restore_fn = 0,
+        .ui_rehydrate_fn = 0
+    };
+    return restore_registry_register_descriptor(&desc);
 }
