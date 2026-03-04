@@ -34,7 +34,7 @@ extern int sdmmc_send_cmd(uint32_t cmd, uint32_t arg, uint32_t waitresp, uint32_
 
 /* Software poll-loop limit.  Must outlast SDMMC_HW_DTIMER so the
  * hardware DTIMEOUT flag fires first and the loop sees it in STA.
- * At 216 MHz CPU ≈ 280 ms. */
+ * At 216 MHz CPU ~= 280 ms. */
 #define SDMMC_SW_TIMEOUT         10000000u
 
 /* Post-write programming timeout (card holds DAT0 busy).
