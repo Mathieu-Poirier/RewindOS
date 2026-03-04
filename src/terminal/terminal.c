@@ -19,6 +19,7 @@
 #include "../../include/panic.h"
 #include "../../include/restore_registry.h"
 #include "../../include/restore_loader.h"
+#include "../../include/restore_sim.h"
 
 #define MAX_ARGUMENTS 8
 #define TICKS_PER_SEC 1000u
@@ -324,6 +325,10 @@ static void term_execute(char *line)
                 console_puts("    sderror           Show SD error details\r\n");
                 console_puts("    sdreset           Reset SD hardware state\r\n");
                 console_puts("    restorestat       Show restore loader/registry stats\r\n");
+                console_puts("    ckptsave          Save counter state to in-memory ckpt queue\r\n");
+                console_puts("    ckptload          Load counter state from in-memory ckpt queue\r\n");
+                console_puts("    ckptq             Show in-memory ckpt queue stats\r\n");
+                console_puts("    restoresim [limit] [value] [bg]  Simulate in-memory restore blob\r\n");
                 console_puts("\r\n");
                 return;
         }
@@ -715,6 +720,159 @@ static void term_execute(char *line)
                         console_puts(restore_class_name(d->task_class));
                         console_puts(" ver=");
                         console_put_u32(d->state_version);
+                        console_puts("\r\n");
+                }
+                return;
+        }
+
+        if (streq(argv[0], "ckptq"))
+        {
+                console_puts("ckptq: pending=");
+                console_put_u32(restore_sim_pending());
+                console_puts(" gen=");
+                console_put_u32(restore_sim_generation());
+                console_puts("\r\n");
+                return;
+        }
+
+        if (streq(argv[0], "ckptsave"))
+        {
+                counter_task_state_t st;
+                int rc = counter_task_get_state(&st);
+                if (rc != SCHED_OK)
+                {
+                        console_puts("ckptsave: counter state err=");
+                        uart_put_s32(rc);
+                        console_puts("\r\n");
+                        return;
+                }
+                (void)restore_sim_reset();
+                rc = restore_sim_enqueue((uint16_t)AO_COUNTER, 1u, &st, (uint32_t)sizeof(st));
+                if (rc != SCHED_OK)
+                {
+                        console_puts("ckptsave: enqueue err=");
+                        uart_put_s32(rc);
+                        console_puts("\r\n");
+                        return;
+                }
+                console_puts("ckptsave: ok value=");
+                console_put_u32(st.value);
+                console_puts(" limit=");
+                console_put_u32(st.limit);
+                console_puts(" pending=");
+                console_put_u32(restore_sim_pending());
+                console_puts("\r\n");
+                return;
+        }
+
+        if (streq(argv[0], "ckptload"))
+        {
+                uint32_t applied = 0u, skipped = 0u, failed = 0u;
+                counter_task_state_t st;
+                int rc = restore_sim_apply(g_sched, &applied, &skipped, &failed);
+                console_puts("ckptload: rc=");
+                uart_put_s32(rc);
+                console_puts(" applied=");
+                console_put_u32(applied);
+                console_puts(" skipped=");
+                console_put_u32(skipped);
+                console_puts(" failed=");
+                console_put_u32(failed);
+                console_puts("\r\n");
+
+                if (counter_task_get_state(&st) == SCHED_OK)
+                {
+                        console_puts("counter state: active=");
+                        console_put_u32(st.active);
+                        console_puts(" value=");
+                        console_put_u32(st.value);
+                        console_puts(" limit=");
+                        console_put_u32(st.limit);
+                        console_puts(" bg=");
+                        console_put_u32(st.bg);
+                        console_puts("\r\n");
+                }
+                return;
+        }
+
+        if (streq(argv[0], "restoresim"))
+        {
+                uint32_t limit = 50u;
+                uint32_t value = 25u;
+                uint32_t bg = 0u;
+                counter_task_state_t st;
+                uint32_t applied = 0u, skipped = 0u, failed = 0u;
+                int rc;
+
+                if (argc >= 2 && !parse_u32(argv[1], &limit))
+                {
+                        console_puts("restoresim: bad limit\r\n");
+                        return;
+                }
+                if (argc >= 3 && !parse_u32(argv[2], &value))
+                {
+                        console_puts("restoresim: bad value\r\n");
+                        return;
+                }
+                if (argc >= 4 && !parse_u32(argv[3], &bg))
+                {
+                        console_puts("restoresim: bad bg\r\n");
+                        return;
+                }
+                if (limit == 0u)
+                        limit = 1u;
+                if (value == 0u)
+                        value = 1u;
+                if (value > limit)
+                        value = limit;
+
+                st.active = 1u;
+                st.bg = (uint8_t)(bg & 1u);
+                st.step_pending = 0u;
+                st.limit = limit;
+                st.value = value;
+                st.next_tick = systick_now() + 10u;
+
+                (void)restore_sim_reset();
+                rc = restore_sim_enqueue((uint16_t)AO_COUNTER, 1u, &st, (uint32_t)sizeof(st));
+                if (rc != SCHED_OK)
+                {
+                        console_puts("restoresim: enqueue err=");
+                        uart_put_s32(rc);
+                        console_puts("\r\n");
+                        return;
+                }
+                /* Also enqueue one restart-only task entry to validate skip accounting. */
+                rc = restore_sim_enqueue((uint16_t)AO_TERMINAL, 0u, 0, 0u);
+                if (rc != SCHED_OK)
+                {
+                        console_puts("restoresim: enqueue2 err=");
+                        uart_put_s32(rc);
+                        console_puts("\r\n");
+                        return;
+                }
+
+                rc = restore_sim_apply(g_sched, &applied, &skipped, &failed);
+                console_puts("restoresim: rc=");
+                uart_put_s32(rc);
+                console_puts(" applied=");
+                console_put_u32(applied);
+                console_puts(" skipped=");
+                console_put_u32(skipped);
+                console_puts(" failed=");
+                console_put_u32(failed);
+                console_puts("\r\n");
+
+                if (counter_task_get_state(&st) == SCHED_OK)
+                {
+                        console_puts("counter state: active=");
+                        console_put_u32(st.active);
+                        console_puts(" value=");
+                        console_put_u32(st.value);
+                        console_puts(" limit=");
+                        console_put_u32(st.limit);
+                        console_puts(" bg=");
+                        console_put_u32(st.bg);
                         console_puts("\r\n");
                 }
                 return;

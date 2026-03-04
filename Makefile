@@ -136,7 +136,13 @@ flash: all
 		-c "program $(MAIN_HEX) verify" \
 		-c "reset run; exit"
 
+# ===== Convenience target: clean -> debug build -> flash =====
+debug-flash:
+	@$(MAKE) clean
+	@$(MAKE) all RWOS_RESTORE_SELFTEST=1
+	@$(MAKE) flash RWOS_RESTORE_SELFTEST=1
+
 clean:
 	@rm -rf build
 
-.PHONY: all flash clean connect
+.PHONY: all flash clean connect debug-flash
