@@ -326,10 +326,12 @@ static void term_execute(char *line)
                 console_puts("    sdreset           Reset SD hardware state\r\n");
                 console_puts("    restorestat       Show restore loader/registry stats\r\n");
                 console_puts("    ckptsave          Save counter state to in-memory ckpt queue\r\n");
+                console_puts("    ckptsaveop <mul> <div>  Save counter state+ops to in-memory ckpt queue\r\n");
                 console_puts("    ckptload          Load counter state from in-memory ckpt queue\r\n");
                 console_puts("    ckptq             Show in-memory ckpt queue stats\r\n");
                 console_puts("    restoresim [limit] [value] [bg]  Simulate in-memory restore blob\r\n");
                 console_puts("    restoresimop <limit> <value> <mul> <div> [bg]  Simulate ordered ops restore\r\n");
+                console_puts("    restoresimbad [ver|action|div0|len]  Simulate invalid restore blob\r\n");
                 console_puts("\r\n");
                 return;
         }
@@ -776,6 +778,76 @@ static void term_execute(char *line)
                 return;
         }
 
+        if (streq(argv[0], "ckptsaveop"))
+        {
+                uint32_t mul = 1u;
+                uint32_t div = 1u;
+                counter_task_state_t st;
+                counter_restore_op_t ops[2];
+                uint16_t op_count = 0u;
+                uint8_t blob[sizeof(restorable_envelope_t)];
+                uint32_t blob_len = (uint32_t)sizeof(blob);
+                int rc;
+
+                if (argc < 3)
+                {
+                        console_puts("usage: ckptsaveop <mul> <div>\r\n");
+                        return;
+                }
+                if (!parse_u32(argv[1], &mul) || !parse_u32(argv[2], &div))
+                {
+                        console_puts("ckptsaveop: bad args\r\n");
+                        return;
+                }
+                if (counter_task_get_state(&st) != SCHED_OK)
+                {
+                        console_puts("ckptsaveop: counter state err\r\n");
+                        return;
+                }
+                if (mul > 1u)
+                {
+                        ops[op_count].op = COUNTER_RESTORE_OP_MUL;
+                        ops[op_count].reserved[0] = 0u;
+                        ops[op_count].reserved[1] = 0u;
+                        ops[op_count].reserved[2] = 0u;
+                        ops[op_count].operand = mul;
+                        op_count++;
+                }
+                if (div > 1u)
+                {
+                        ops[op_count].op = COUNTER_RESTORE_OP_DIV;
+                        ops[op_count].reserved[0] = 0u;
+                        ops[op_count].reserved[1] = 0u;
+                        ops[op_count].reserved[2] = 0u;
+                        ops[op_count].operand = div;
+                        op_count++;
+                }
+                rc = counter_task_encode_restore_envelope(&st, ops, op_count, blob, &blob_len);
+                if (rc != SCHED_OK)
+                {
+                        console_puts("ckptsaveop: encode err=");
+                        uart_put_s32(rc);
+                        console_puts("\r\n");
+                        return;
+                }
+
+                (void)restore_sim_reset();
+                rc = restore_sim_enqueue((uint16_t)AO_COUNTER, 2u, blob, blob_len);
+                if (rc != SCHED_OK)
+                {
+                        console_puts("ckptsaveop: enqueue err=");
+                        uart_put_s32(rc);
+                        console_puts("\r\n");
+                        return;
+                }
+                console_puts("ckptsaveop: ok ops=");
+                console_put_u32(op_count);
+                console_puts(" pending=");
+                console_put_u32(restore_sim_pending());
+                console_puts("\r\n");
+                return;
+        }
+
         if (streq(argv[0], "ckptload"))
         {
                 uint32_t applied = 0u, skipped = 0u, failed = 0u;
@@ -997,6 +1069,79 @@ static void term_execute(char *line)
                         console_put_u32(st.bg);
                         console_puts("\r\n");
                 }
+                return;
+        }
+
+        if (streq(argv[0], "restoresimbad"))
+        {
+                const char *mode = (argc >= 2) ? argv[1] : "ver";
+                counter_task_state_t st;
+                counter_restore_op_t op;
+                uint8_t blob[sizeof(restorable_envelope_t)];
+                uint32_t blob_len = (uint32_t)sizeof(blob);
+                uint32_t applied = 0u, skipped = 0u, failed = 0u;
+                int rc;
+
+                st.active = 1u;
+                st.bg = 0u;
+                st.step_pending = 0u;
+                st.limit = 100u;
+                st.value = 10u;
+                st.next_tick = systick_now() + 10u;
+                op.op = COUNTER_RESTORE_OP_MUL;
+                op.reserved[0] = 0u;
+                op.reserved[1] = 0u;
+                op.reserved[2] = 0u;
+                op.operand = 3u;
+
+                rc = counter_task_encode_restore_envelope(&st, &op, 1u, blob, &blob_len);
+                if (rc != SCHED_OK)
+                {
+                        console_puts("restoresimbad: encode err=");
+                        uart_put_s32(rc);
+                        console_puts("\r\n");
+                        return;
+                }
+
+                {
+                        restorable_envelope_t *env = (restorable_envelope_t *)blob;
+                        if (streq(mode, "ver")) {
+                                env->hdr.version = (uint16_t)(env->hdr.version + 1u);
+                        } else if (streq(mode, "action")) {
+                                env->entries[1].action = 0xFFFFu;
+                        } else if (streq(mode, "div0")) {
+                                counter_restore_op_t *bad_op = (counter_restore_op_t *)env->entries[1].data;
+                                bad_op->op = COUNTER_RESTORE_OP_DIV;
+                                bad_op->operand = 0u;
+                        } else if (streq(mode, "len")) {
+                                env->entries[1].data_len = (uint16_t)(sizeof(counter_restore_op_t) - 1u);
+                        } else {
+                                console_puts("restoresimbad: mode must be ver|action|div0|len\r\n");
+                                return;
+                        }
+                }
+
+                (void)restore_sim_reset();
+                rc = restore_sim_enqueue((uint16_t)AO_COUNTER, 2u, blob, blob_len);
+                if (rc != SCHED_OK)
+                {
+                        console_puts("restoresimbad: enqueue err=");
+                        uart_put_s32(rc);
+                        console_puts("\r\n");
+                        return;
+                }
+                rc = restore_sim_apply(g_sched, &applied, &skipped, &failed);
+                console_puts("restoresimbad: mode=");
+                console_puts(mode);
+                console_puts(" rc=");
+                uart_put_s32(rc);
+                console_puts(" applied=");
+                console_put_u32(applied);
+                console_puts(" skipped=");
+                console_put_u32(skipped);
+                console_puts(" failed=");
+                console_put_u32(failed);
+                console_puts("\r\n");
                 return;
         }
 

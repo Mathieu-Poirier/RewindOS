@@ -321,6 +321,8 @@ static int counter_restore_get_state_fn(void *out, uint32_t *io_len)
 static int counter_restore_apply_state_fn(const void *blob, uint32_t len)
 {
     const restorable_envelope_t *env = (const restorable_envelope_t *)blob;
+    counter_task_state_t temp_state = g_counter_ctx;
+    uint8_t have_base_state = 0u;
     uint8_t consumed[RESTORE_ENV_MAX_ENTRIES];
     uint16_t i;
 
@@ -378,48 +380,59 @@ static int counter_restore_apply_state_fn(const void *blob, uint32_t len)
                 if (e->data_len != sizeof(counter_task_state_t)) {
                     return SCHED_ERR_PARAM;
                 }
-                if (counter_task_restore_state((const counter_task_state_t *)e->data) != SCHED_OK) {
-                    return SCHED_ERR_PARAM;
-                }
+                temp_state = *(const counter_task_state_t *)e->data;
+                temp_state.step_pending = 0u;
+                have_base_state = 1u;
                 continue;
             }
             if (e->action == COUNTER_RESTORE_ACTION_APPLY_OP) {
                 const counter_restore_op_t *op;
+                if (!have_base_state) {
+                    return SCHED_ERR_PARAM;
+                }
                 if (e->data_len != sizeof(counter_restore_op_t)) {
                     return SCHED_ERR_PARAM;
                 }
                 op = (const counter_restore_op_t *)e->data;
                 if (op->op == COUNTER_RESTORE_OP_ADD) {
-                    g_counter_ctx.value += op->operand;
+                    temp_state.value += op->operand;
                 } else if (op->op == COUNTER_RESTORE_OP_SUB) {
-                    if (g_counter_ctx.value > op->operand) {
-                        g_counter_ctx.value -= op->operand;
+                    if (temp_state.value > op->operand) {
+                        temp_state.value -= op->operand;
                     } else {
-                        g_counter_ctx.value = 1u;
+                        temp_state.value = 1u;
                     }
                 } else if (op->op == COUNTER_RESTORE_OP_MUL) {
-                    g_counter_ctx.value *= op->operand;
+                    temp_state.value *= op->operand;
                 } else if (op->op == COUNTER_RESTORE_OP_DIV) {
                     if (op->operand == 0u) {
                         return SCHED_ERR_PARAM;
                     }
-                    g_counter_ctx.value /= op->operand;
-                    if (g_counter_ctx.value == 0u) {
-                        g_counter_ctx.value = 1u;
+                    temp_state.value /= op->operand;
+                    if (temp_state.value == 0u) {
+                        temp_state.value = 1u;
                     }
                 } else {
                     return SCHED_ERR_PARAM;
                 }
-                if (g_counter_ctx.value > g_counter_ctx.limit && g_counter_ctx.limit != 0u) {
-                    g_counter_ctx.value = g_counter_ctx.limit;
+                if (temp_state.value > temp_state.limit && temp_state.limit != 0u) {
+                    temp_state.value = temp_state.limit;
                 }
                 continue;
             }
             return SCHED_ERR_PARAM;
         }
     }
-
+    if (!have_base_state) {
+        return SCHED_ERR_PARAM;
+    }
+    g_counter_ctx = temp_state;
     g_counter_ctx.step_pending = 0u;
+    counter_out_puts("counter: restore value=");
+    counter_out_put_u32(g_counter_ctx.value);
+    counter_out_puts(" limit=");
+    counter_out_put_u32(g_counter_ctx.limit);
+    counter_out_puts("\r\n");
     g_counter_state_restored = 1u;
     return SCHED_OK;
 }

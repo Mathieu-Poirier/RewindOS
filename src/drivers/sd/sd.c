@@ -2,8 +2,10 @@
 
 extern int sd_init(void);
 extern int sd_read_blocks(uint32_t lba, uint32_t count, void *buf);
+extern int sd_write_blocks(uint32_t lba, uint32_t count, const void *buf);
 extern const sd_info_t *sd_get_info(void);
 extern int sd_last_error(void);
+extern int sd_wait_card_ready(void);
 extern void sd_detect_init(void);
 extern int sd_is_detected(void);
 extern uint32_t sd_last_cmd(void);
@@ -14,6 +16,12 @@ extern void sd_set_data_clkdiv(uint32_t div);
 extern uint32_t sd_get_data_clkdiv(void);
 extern void sd_use_pll48(int use_pll);
 extern int sd_get_use_pll48(void);
+extern uint32_t sd_dbg_wait_ready_calls(void);
+extern uint32_t sd_dbg_wait_ready_ok(void);
+extern uint32_t sd_dbg_wait_ready_timeout(void);
+extern uint32_t sd_dbg_wait_ready_cmd_fail_fast(void);
+extern uint32_t sd_dbg_write_stage(void);
+extern uint32_t sd_dbg_write_last_sta(void);
 
 /* Assembly helpers used by the SDMMC1 driver. */
 extern void pc8pc12_to_sdmmc1(void);
