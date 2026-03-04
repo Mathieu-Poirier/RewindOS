@@ -30,6 +30,10 @@
 #define CKPT_SD_SLOT0_LBA 2060u
 #define CKPT_SD_SLOT1_LBA 2061u
 #define CKPT_SD_SLOT_COUNT 2u
+#define CKPT_SD_MAX_REGIONS 8u
+#define CKPT_SD_MAX_BLOB 384u
+#define CKPT_META_MAGIC 0x4154454Du /* "META" */
+#define CKPT_META_VERSION 1u
 
 typedef struct {
         shell_state_t shell;
@@ -56,6 +60,9 @@ static uint8_t g_ckpt_sd_seq_seeded = 0u;
 static uint32_t g_ckpt_auto_interval_ms = 0u;
 static uint32_t g_ckpt_auto_interval_ticks = 0u;
 static uint32_t g_ckpt_auto_next_tick = 0u;
+static uint32_t g_ckpt_running_prev_bitmap = 0u;
+static uint16_t g_ckpt_launch_count[SCHED_MAX_AO];
+static uint16_t g_ckpt_exit_count[SCHED_MAX_AO];
 
 static void buf_zero(uint8_t *p, uint32_t n)
 {
@@ -65,6 +72,22 @@ static void buf_zero(uint8_t *p, uint32_t n)
 static void buf_copy(uint8_t *dst, const uint8_t *src, uint32_t n)
 {
         for (uint32_t i = 0u; i < n; i++) dst[i] = src[i];
+}
+
+static void u32_store_le(uint8_t *dst, uint32_t v)
+{
+        dst[0] = (uint8_t)(v & 0xFFu);
+        dst[1] = (uint8_t)((v >> 8) & 0xFFu);
+        dst[2] = (uint8_t)((v >> 16) & 0xFFu);
+        dst[3] = (uint8_t)((v >> 24) & 0xFFu);
+}
+
+static uint32_t u32_load_le(const uint8_t *src)
+{
+        return ((uint32_t)src[0])
+             | ((uint32_t)src[1] << 8)
+             | ((uint32_t)src[2] << 16)
+             | ((uint32_t)src[3] << 24);
 }
 
 static uint32_t crc32_calc(const uint8_t *data, uint32_t len)
@@ -89,17 +112,16 @@ static uint32_t ckpt_sd_lba_for_slot(uint32_t slot)
 
 static int ckpt_sd_read_valid_slot(uint32_t slot,
                                    checkpoint_v2_header_t *out_hdr,
-                                   checkpoint_v2_region_t *out_reg,
                                    uint8_t *out_block)
 {
         uint32_t blk_words[SD_BLOCK_SIZE / 4u];
         uint8_t *blk = (uint8_t *)blk_words;
         checkpoint_v2_header_t hdr;
-        checkpoint_v2_region_t reg;
+        uint32_t regions_bytes;
         uint32_t hdr_crc_expected;
         int rc;
 
-        if (slot >= CKPT_SD_SLOT_COUNT || out_hdr == 0 || out_reg == 0 || out_block == 0)
+        if (slot >= CKPT_SD_SLOT_COUNT || out_hdr == 0 || out_block == 0)
                 return 0;
 
         rc = sd_read_blocks(ckpt_sd_lba_for_slot(slot), 1u, blk_words);
@@ -110,7 +132,8 @@ static int ckpt_sd_read_valid_slot(uint32_t slot,
         if (hdr.magic != CKPT_V2_MAGIC ||
             hdr.format_version != CKPT_V2_FORMAT_VERSION ||
             hdr.state != CKPT_SLOT_STATE_COMMITTED ||
-            hdr.region_count != 1u ||
+            hdr.region_count == 0u ||
+            hdr.region_count > CKPT_V2_MAX_REGIONS ||
             hdr.header_size != sizeof(checkpoint_v2_header_t))
                 return 0;
 
@@ -120,17 +143,26 @@ static int ckpt_sd_read_valid_slot(uint32_t slot,
                 return 0;
         hdr.header_crc32 = hdr_crc_expected;
 
-        buf_copy((uint8_t *)&reg, blk + sizeof(checkpoint_v2_header_t), (uint32_t)sizeof(reg));
-        if (crc32_calc((const uint8_t *)&reg, (uint32_t)sizeof(reg)) != hdr.regions_crc32)
+        regions_bytes = (uint32_t)hdr.region_count * (uint32_t)sizeof(checkpoint_v2_region_t);
+        if ((uint32_t)sizeof(checkpoint_v2_header_t) + regions_bytes > SD_BLOCK_SIZE)
                 return 0;
-        if (reg.offset + reg.length > SD_BLOCK_SIZE ||
-            reg.offset < sizeof(checkpoint_v2_header_t) + sizeof(checkpoint_v2_region_t))
-                return 0;
-        if (crc32_calc(blk + reg.offset, reg.length) != reg.crc32)
+        if (crc32_calc(blk + sizeof(checkpoint_v2_header_t), regions_bytes) != hdr.regions_crc32)
                 return 0;
 
+        for (uint16_t i = 0u; i < hdr.region_count; i++)
+        {
+                checkpoint_v2_region_t reg;
+                uint32_t reg_off = (uint32_t)sizeof(checkpoint_v2_header_t)
+                                 + ((uint32_t)i * (uint32_t)sizeof(checkpoint_v2_region_t));
+                buf_copy((uint8_t *)&reg, blk + reg_off, (uint32_t)sizeof(reg));
+                if (reg.offset + reg.length > SD_BLOCK_SIZE ||
+                    reg.offset < ((uint32_t)sizeof(checkpoint_v2_header_t) + regions_bytes))
+                        return 0;
+                if (crc32_calc(blk + reg.offset, reg.length) != reg.crc32)
+                        return 0;
+        }
+
         *out_hdr = hdr;
-        *out_reg = reg;
         buf_copy(out_block, blk, SD_BLOCK_SIZE);
         return 1;
 }
@@ -138,7 +170,6 @@ static int ckpt_sd_read_valid_slot(uint32_t slot,
 static void ckpt_sd_seed_seq_if_needed(void)
 {
         checkpoint_v2_header_t hdr;
-        checkpoint_v2_region_t reg;
         uint8_t blk[SD_BLOCK_SIZE];
         uint8_t found = 0u;
         uint32_t max_seq = 0u;
@@ -148,7 +179,7 @@ static void ckpt_sd_seed_seq_if_needed(void)
 
         for (uint32_t slot = 0u; slot < CKPT_SD_SLOT_COUNT; slot++)
         {
-                if (!ckpt_sd_read_valid_slot(slot, &hdr, &reg, blk))
+                if (!ckpt_sd_read_valid_slot(slot, &hdr, blk))
                         continue;
                 if (!found || hdr.seq > max_seq)
                 {
@@ -207,34 +238,291 @@ void terminal_task_systick_hook(void)
         (void)sched_post_isr(g_sched, AO_TERMINAL, &ev);
 }
 
-static int term_ckptsave_sd_once(uint32_t *out_lba, uint32_t *out_slot, uint32_t *out_seq, uint32_t *out_value)
+typedef struct {
+        uint8_t task_id;
+        uint16_t state_version;
+        uint32_t len;
+        uint8_t blob[CKPT_SD_MAX_BLOB];
+} ckpt_region_item_t;
+
+typedef struct {
+        uint8_t task_id;
+        uint8_t reserved;
+        uint16_t launch_count;
+        uint16_t exit_count;
+        uint16_t reserved2;
+} __attribute__((packed)) ckpt_lifecycle_entry_t;
+
+typedef struct {
+        uint32_t magic;
+        uint16_t version;
+        uint16_t entry_count;
+        uint32_t running_bitmap;
+        ckpt_lifecycle_entry_t entries[CKPT_SD_MAX_REGIONS];
+} __attribute__((packed)) ckpt_lifecycle_meta_t;
+
+static uint32_t ckpt_meta_size(uint16_t entry_count)
+{
+        return (uint32_t)sizeof(uint32_t)
+             + (uint32_t)sizeof(uint16_t)
+             + (uint32_t)sizeof(uint16_t)
+             + (uint32_t)sizeof(uint32_t)
+             + ((uint32_t)entry_count * (uint32_t)sizeof(ckpt_lifecycle_entry_t));
+}
+
+static void term_ckpt_preview(void)
+{
+        uint32_t running_bitmap = 0u;
+        uint32_t launched;
+        uint32_t exited;
+        uint16_t launch_tmp[SCHED_MAX_AO];
+        uint16_t exit_tmp[SCHED_MAX_AO];
+        uint8_t meta_task_ids[CKPT_SD_MAX_REGIONS];
+        uint16_t meta_entry_count = 0u;
+        ckpt_region_item_t items[CKPT_SD_MAX_REGIONS];
+        uint16_t region_count = 0u;
+        uint32_t payload_bytes = 0u;
+        uint32_t active_bitmap = 0u;
+        uint32_t meta_len;
+        uint32_t total_bytes;
+
+        if (g_sched == 0)
+        {
+                console_puts("ckptpreview: scheduler not ready\r\n");
+                return;
+        }
+
+        for (uint32_t i = 0u; i < SCHED_MAX_AO; i++)
+        {
+                launch_tmp[i] = g_ckpt_launch_count[i];
+                exit_tmp[i] = g_ckpt_exit_count[i];
+                if (g_sched->table[i] != 0)
+                        running_bitmap |= (1u << i);
+        }
+
+        launched = running_bitmap & ~g_ckpt_running_prev_bitmap;
+        exited = g_ckpt_running_prev_bitmap & ~running_bitmap;
+        for (uint32_t i = 0u; i < SCHED_MAX_AO; i++)
+        {
+                if ((launched & (1u << i)) != 0u)
+                        launch_tmp[i]++;
+                if ((exited & (1u << i)) != 0u)
+                        exit_tmp[i]++;
+        }
+
+        for (uint32_t id = 0u; id < SCHED_MAX_AO && meta_entry_count < CKPT_SD_MAX_REGIONS; id++)
+        {
+                const restore_task_descriptor_t *desc = restore_registry_find((uint8_t)id);
+                if (desc == 0 || desc->task_class != TASK_CLASS_RESTORABLE_NOW)
+                        continue;
+                meta_task_ids[meta_entry_count++] = (uint8_t)id;
+        }
+
+        meta_len = ckpt_meta_size(meta_entry_count);
+        for (uint32_t id = 0u; id < SCHED_MAX_AO && region_count < CKPT_SD_MAX_REGIONS; id++)
+        {
+                const restore_task_descriptor_t *desc = restore_registry_find((uint8_t)id);
+                uint32_t len;
+                uint32_t candidate_regions;
+                uint32_t candidate_total;
+                int rc;
+
+                if (desc == 0 || desc->task_class != TASK_CLASS_RESTORABLE_NOW || desc->get_state_fn == 0)
+                        continue;
+                if (g_sched->table[id] == 0)
+                        continue;
+                if (desc->max_state_len > CKPT_SD_MAX_BLOB)
+                        continue;
+
+                len = CKPT_SD_MAX_BLOB;
+                rc = desc->get_state_fn(items[region_count].blob, &len);
+                if (rc != SCHED_OK)
+                        continue;
+                if (len < desc->min_state_len || len > desc->max_state_len || len > CKPT_SD_MAX_BLOB)
+                        continue;
+
+                candidate_regions = (uint32_t)region_count + 1u;
+                candidate_total = (uint32_t)sizeof(checkpoint_v2_header_t)
+                                + (candidate_regions * (uint32_t)sizeof(checkpoint_v2_region_t))
+                                + payload_bytes + len + meta_len;
+                if (candidate_total > SD_BLOCK_SIZE)
+                        continue;
+
+                items[region_count].task_id = (uint8_t)id;
+                items[region_count].state_version = desc->state_version;
+                items[region_count].len = len;
+                payload_bytes += len;
+                active_bitmap |= (1u << id);
+                region_count++;
+        }
+
+        total_bytes = (uint32_t)sizeof(checkpoint_v2_header_t)
+                    + ((uint32_t)region_count * (uint32_t)sizeof(checkpoint_v2_region_t))
+                    + payload_bytes + meta_len;
+
+        console_puts("ckptpreview: next_seq=");
+        console_put_u32(g_ckpt_sd_seq);
+        console_puts(" running_bitmap=0x");
+        console_put_hex32(running_bitmap);
+        console_puts(" active_bitmap=0x");
+        console_put_hex32(active_bitmap);
+        console_puts("\r\n");
+
+        console_puts("  regions=");
+        console_put_u32(region_count);
+        console_puts(" payload=");
+        console_put_u32(payload_bytes);
+        console_puts(" meta=");
+        console_put_u32(meta_len);
+        console_puts(" total=");
+        console_put_u32(total_bytes);
+        console_puts("/");
+        console_put_u32(SD_BLOCK_SIZE);
+        console_puts(" bytes\r\n");
+
+        for (uint16_t i = 0u; i < region_count; i++)
+        {
+                uint8_t tid = items[i].task_id;
+                console_puts("  region id=");
+                console_put_u32(tid);
+                console_puts(" ver=");
+                console_put_u32(items[i].state_version);
+                console_puts(" len=");
+                console_put_u32(items[i].len);
+                console_puts(" launch=");
+                console_put_u32(launch_tmp[tid]);
+                console_puts(" exit=");
+                console_put_u32(exit_tmp[tid]);
+                console_puts(" restore=");
+                console_puts((launch_tmp[tid] > exit_tmp[tid]) ? "yes" : "no");
+                console_puts("\r\n");
+        }
+
+        for (uint16_t i = 0u; i < meta_entry_count; i++)
+        {
+                uint8_t tid = meta_task_ids[i];
+                uint8_t already = 0u;
+                for (uint16_t j = 0u; j < region_count; j++)
+                {
+                        if (items[j].task_id == tid)
+                        {
+                                already = 1u;
+                                break;
+                        }
+                }
+                if (already)
+                        continue;
+                console_puts("  lifecycle id=");
+                console_put_u32(tid);
+                console_puts(" launch=");
+                console_put_u32(launch_tmp[tid]);
+                console_puts(" exit=");
+                console_put_u32(exit_tmp[tid]);
+                console_puts(" restore=no (not active/no region)\r\n");
+        }
+}
+
+static int term_ckptsave_sd_once(uint32_t *out_lba, uint32_t *out_slot, uint32_t *out_seq, uint32_t *out_regions)
 {
         uint32_t blk_words[SD_BLOCK_SIZE / 4u];
         uint8_t *blk = (uint8_t *)blk_words;
         checkpoint_v2_header_t hdr;
-        checkpoint_v2_region_t reg;
-        counter_task_state_t st;
-        uint8_t env_blob[sizeof(restorable_envelope_t)];
-        uint32_t env_len = (uint32_t)sizeof(env_blob);
+        checkpoint_v2_region_t regs[CKPT_SD_MAX_REGIONS];
+        ckpt_region_item_t items[CKPT_SD_MAX_REGIONS];
+        ckpt_lifecycle_meta_t meta;
+        uint8_t meta_task_ids[CKPT_SD_MAX_REGIONS];
         uint32_t slot_id;
         uint32_t target_lba;
+        uint32_t payload_bytes = 0u;
+        uint16_t region_count = 0u;
+        uint16_t meta_entry_count = 0u;
+        uint32_t active_bitmap = 0u;
+        uint32_t running_bitmap = 0u;
+        uint32_t meta_len = 0u;
+        uint32_t meta_off = 0u;
         int rc;
-        uint32_t payload_off = (uint32_t)(sizeof(checkpoint_v2_header_t) + sizeof(checkpoint_v2_region_t));
+        uint32_t payload_off;
 
         ckpt_sd_seed_seq_if_needed();
+        if (g_sched == 0)
+                return SCHED_ERR_PARAM;
 
-        rc = counter_task_get_state(&st);
-        if (rc != SCHED_OK)
-                return rc;
-        rc = counter_task_encode_restore_envelope(&st, 0, 0, env_blob, &env_len);
-        if (rc != SCHED_OK)
-                return rc;
-        if (payload_off + env_len > SD_BLOCK_SIZE)
+        for (uint32_t id = 0u; id < SCHED_MAX_AO; id++)
+        {
+                if (g_sched->table[id] != 0)
+                        running_bitmap |= (1u << id);
+        }
+        {
+                uint32_t launched = running_bitmap & ~g_ckpt_running_prev_bitmap;
+                uint32_t exited = g_ckpt_running_prev_bitmap & ~running_bitmap;
+                for (uint32_t id = 0u; id < SCHED_MAX_AO; id++)
+                {
+                        if ((launched & (1u << id)) != 0u)
+                                g_ckpt_launch_count[id]++;
+                        if ((exited & (1u << id)) != 0u)
+                                g_ckpt_exit_count[id]++;
+                }
+                g_ckpt_running_prev_bitmap = running_bitmap;
+        }
+
+        for (uint32_t id = 0u; id < SCHED_MAX_AO && meta_entry_count < CKPT_SD_MAX_REGIONS; id++)
+        {
+                const restore_task_descriptor_t *desc = restore_registry_find((uint8_t)id);
+                if (desc == 0 || desc->task_class != TASK_CLASS_RESTORABLE_NOW)
+                        continue;
+                meta_task_ids[meta_entry_count++] = (uint8_t)id;
+        }
+        meta_len = ckpt_meta_size(meta_entry_count);
+
+        for (uint32_t id = 0u; id < SCHED_MAX_AO && region_count < CKPT_SD_MAX_REGIONS; id++)
+        {
+                const restore_task_descriptor_t *desc = restore_registry_find((uint8_t)id);
+                uint32_t len;
+                uint32_t candidate_regions;
+                uint32_t candidate_total;
+
+                if (desc == 0 || desc->task_class != TASK_CLASS_RESTORABLE_NOW || desc->get_state_fn == 0)
+                        continue;
+                if (g_sched->table[id] == 0)
+                        continue;
+                if (desc->max_state_len > CKPT_SD_MAX_BLOB)
+                        continue;
+
+                len = CKPT_SD_MAX_BLOB;
+                rc = desc->get_state_fn(items[region_count].blob, &len);
+                if (rc != SCHED_OK)
+                        continue;
+                if (len < desc->min_state_len || len > desc->max_state_len)
+                        continue;
+                if (len > CKPT_SD_MAX_BLOB)
+                        continue;
+
+                candidate_regions = (uint32_t)region_count + 1u;
+                candidate_total = (uint32_t)sizeof(checkpoint_v2_header_t)
+                                + (candidate_regions * (uint32_t)sizeof(checkpoint_v2_region_t))
+                                + payload_bytes + len + meta_len;
+                if (candidate_total > SD_BLOCK_SIZE)
+                        continue;
+
+                items[region_count].task_id = (uint8_t)id;
+                items[region_count].state_version = desc->state_version;
+                items[region_count].len = len;
+                payload_bytes += len;
+                active_bitmap |= (1u << id);
+                region_count++;
+        }
+
+        if ((uint32_t)sizeof(checkpoint_v2_header_t) +
+            ((uint32_t)region_count * (uint32_t)sizeof(checkpoint_v2_region_t)) +
+            payload_bytes + meta_len > SD_BLOCK_SIZE)
                 return SCHED_ERR_FULL;
 
         buf_zero(blk, SD_BLOCK_SIZE);
         slot_id = (g_ckpt_sd_seq - 1u) % CKPT_SD_SLOT_COUNT;
         target_lba = ckpt_sd_lba_for_slot(slot_id);
+        payload_off = (uint32_t)sizeof(checkpoint_v2_header_t)
+                    + ((uint32_t)region_count * (uint32_t)sizeof(checkpoint_v2_region_t));
+        meta_off = payload_off + payload_bytes;
         hdr.magic = CKPT_V2_MAGIC;
         hdr.format_version = CKPT_V2_FORMAT_VERSION;
         hdr.header_size = (uint16_t)sizeof(checkpoint_v2_header_t);
@@ -242,8 +530,8 @@ static int term_ckptsave_sd_once(uint32_t *out_lba, uint32_t *out_slot, uint32_t
         hdr.tick_at_checkpoint = systick_now();
         hdr.slot_id = (uint8_t)slot_id;
         hdr.state = CKPT_SLOT_STATE_COMMITTED;
-        hdr.region_count = 1u;
-        hdr.active_task_bitmap = (st.active ? (1u << AO_COUNTER) : 0u);
+        hdr.region_count = region_count;
+        hdr.active_task_bitmap = active_bitmap;
         hdr.stdin_owner = TERM_STDIN_OWNER_NONE;
         hdr.reserved0[0] = 0u;
         hdr.reserved0[1] = 0u;
@@ -251,20 +539,47 @@ static int term_ckptsave_sd_once(uint32_t *out_lba, uint32_t *out_slot, uint32_t
         hdr.regions_crc32 = 0u;
         hdr.header_crc32 = 0u;
         for (uint32_t i = 0u; i < sizeof(hdr.reserved1); i++) hdr.reserved1[i] = 0u;
+        u32_store_le(&hdr.reserved1[0], meta_off);
+        u32_store_le(&hdr.reserved1[4], meta_len);
 
-        reg.region_id = (uint16_t)AO_COUNTER;
-        reg.state_version = 2u;
-        reg.offset = payload_off;
-        reg.length = env_len;
-        reg.crc32 = crc32_calc(env_blob, env_len);
-
-        hdr.regions_crc32 = crc32_calc((const uint8_t *)&reg, (uint32_t)sizeof(reg));
+        {
+                uint32_t cur_off = payload_off;
+                for (uint16_t i = 0u; i < region_count; i++)
+                {
+                        regs[i].region_id = items[i].task_id;
+                        regs[i].state_version = items[i].state_version;
+                        regs[i].offset = cur_off;
+                        regs[i].length = items[i].len;
+                        regs[i].crc32 = crc32_calc(items[i].blob, items[i].len);
+                        cur_off += items[i].len;
+                }
+        }
+        hdr.regions_crc32 = crc32_calc((const uint8_t *)&regs[0],
+                                       (uint32_t)region_count * (uint32_t)sizeof(checkpoint_v2_region_t));
         hdr.header_crc32 = 0u;
         hdr.header_crc32 = crc32_calc((const uint8_t *)&hdr, (uint32_t)sizeof(hdr));
 
         buf_copy(blk, (const uint8_t *)&hdr, (uint32_t)sizeof(hdr));
-        buf_copy(blk + sizeof(hdr), (const uint8_t *)&reg, (uint32_t)sizeof(reg));
-        buf_copy(blk + payload_off, env_blob, env_len);
+        buf_copy(blk + sizeof(hdr), (const uint8_t *)&regs[0],
+                 (uint32_t)region_count * (uint32_t)sizeof(checkpoint_v2_region_t));
+        for (uint16_t i = 0u; i < region_count; i++)
+        {
+                buf_copy(blk + regs[i].offset, items[i].blob, items[i].len);
+        }
+        meta.magic = CKPT_META_MAGIC;
+        meta.version = CKPT_META_VERSION;
+        meta.entry_count = meta_entry_count;
+        meta.running_bitmap = running_bitmap;
+        for (uint16_t i = 0u; i < meta_entry_count; i++)
+        {
+                uint8_t tid = meta_task_ids[i];
+                meta.entries[i].task_id = tid;
+                meta.entries[i].reserved = 0u;
+                meta.entries[i].launch_count = g_ckpt_launch_count[tid];
+                meta.entries[i].exit_count = g_ckpt_exit_count[tid];
+                meta.entries[i].reserved2 = 0u;
+        }
+        buf_copy(blk + meta_off, (const uint8_t *)&meta, meta_len);
 
         rc = sd_write_blocks(target_lba, 1u, blk_words);
         if (rc != SD_OK)
@@ -273,7 +588,7 @@ static int term_ckptsave_sd_once(uint32_t *out_lba, uint32_t *out_slot, uint32_t
         if (out_lba) *out_lba = target_lba;
         if (out_slot) *out_slot = slot_id;
         if (out_seq) *out_seq = hdr.seq;
-        if (out_value) *out_value = st.value;
+        if (out_regions) *out_regions = region_count;
         g_ckpt_sd_seq_seeded = 1u;
         return SCHED_OK;
 }
@@ -551,6 +866,8 @@ static void term_execute(char *line)
                 console_puts("    sdread0cmp        Read+verify fixed test block\r\n");
                 console_puts("    ckptsave_sd       Save counter checkpoint to SD A/B slot\r\n");
                 console_puts("    ckptload_sd       Load latest valid counter checkpoint from SD A/B slot\r\n");
+                console_puts("    ckptinspect       Inspect latest valid SD checkpoint metadata\r\n");
+                console_puts("    ckptpreview       Dry-run what next SD checkpoint would contain\r\n");
                 console_puts("    ckptcorrupt <slot> Corrupt SD checkpoint slot 0 or 1 (debug)\r\n");
                 console_puts("    autockpt <ms|off> Configure periodic SD checkpoint save\r\n");
                 console_puts("\r\n");
@@ -949,8 +1266,8 @@ static void term_execute(char *line)
 
         if (streq(argv[0], "ckptsave_sd"))
         {
-                uint32_t lba = 0u, slot = 0u, seq = 0u, value = 0u;
-                int rc = term_ckptsave_sd_once(&lba, &slot, &seq, &value);
+                uint32_t lba = 0u, slot = 0u, seq = 0u, regions = 0u;
+                int rc = term_ckptsave_sd_once(&lba, &slot, &seq, &regions);
                 if (rc != SCHED_OK)
                 {
                         console_puts("ckptsave_sd: err=");
@@ -964,8 +1281,8 @@ static void term_execute(char *line)
                 console_put_u32(slot);
                 console_puts(" seq=");
                 console_put_u32(seq);
-                console_puts(" value=");
-                console_put_u32(value);
+                console_puts(" regions=");
+                console_put_u32(regions);
                 console_puts("\r\n");
                 return;
         }
@@ -1004,7 +1321,7 @@ static void term_execute(char *line)
                 uint8_t *blk = (uint8_t *)blk_words;
                 uint8_t selected_blk[SD_BLOCK_SIZE];
                 checkpoint_v2_header_t best_hdr;
-                checkpoint_v2_region_t best_reg;
+                checkpoint_v2_region_t filtered_regions[CKPT_V2_MAX_REGIONS];
                 uint8_t best_found = 0u;
                 uint32_t applied = 0u, skipped = 0u, failed = 0u;
                 uint32_t selected_lba = 0u;
@@ -1015,15 +1332,13 @@ static void term_execute(char *line)
                 for (uint32_t slot = 0u; slot < CKPT_SD_SLOT_COUNT; slot++)
                 {
                         checkpoint_v2_header_t hdr;
-                        checkpoint_v2_region_t reg;
-                        if (!ckpt_sd_read_valid_slot(slot, &hdr, &reg, blk))
+                        if (!ckpt_sd_read_valid_slot(slot, &hdr, blk))
                                 continue;
 
                         if (!best_found || hdr.seq > best_hdr.seq)
                         {
                                 best_found = 1u;
                                 best_hdr = hdr;
-                                best_reg = reg;
                                 selected_lba = ckpt_sd_lba_for_slot(slot);
                                 buf_copy(selected_blk, blk, SD_BLOCK_SIZE);
                         }
@@ -1035,10 +1350,49 @@ static void term_execute(char *line)
                         return;
                 }
 
+                {
+                        const checkpoint_v2_region_t *all_regions =
+                                (const checkpoint_v2_region_t *)(selected_blk + sizeof(checkpoint_v2_header_t));
+                        uint16_t filtered_count = 0u;
+                        uint32_t meta_off = u32_load_le(&best_hdr.reserved1[0]);
+                        uint32_t meta_len = u32_load_le(&best_hdr.reserved1[4]);
+                        const ckpt_lifecycle_meta_t *meta = 0;
+
+                        if (meta_len >= ckpt_meta_size(0u) && meta_off + meta_len <= SD_BLOCK_SIZE)
+                        {
+                                meta = (const ckpt_lifecycle_meta_t *)(selected_blk + meta_off);
+                                if (meta->magic != CKPT_META_MAGIC || meta->version != CKPT_META_VERSION)
+                                        meta = 0;
+                                else if (meta->entry_count > best_hdr.region_count)
+                                        meta = 0;
+                        }
+
+                        for (uint16_t i = 0u; i < best_hdr.region_count; i++)
+                        {
+                                const checkpoint_v2_region_t *r = &all_regions[i];
+                                uint8_t allow = 1u;
+                                if (meta != 0)
+                                {
+                                        for (uint16_t j = 0u; j < meta->entry_count; j++)
+                                        {
+                                                if (meta->entries[j].task_id != (uint8_t)r->region_id)
+                                                        continue;
+                                                if (meta->entries[j].launch_count <= meta->entries[j].exit_count)
+                                                        allow = 0u;
+                                                break;
+                                        }
+                                }
+                                if (!allow)
+                                        continue;
+                                filtered_regions[filtered_count++] = *r;
+                        }
+
                 rc = restore_loader_apply_regions(g_sched,
-                                                  &best_reg, 1u,
+                                                  filtered_regions,
+                                                  filtered_count,
                                                   selected_blk, SD_BLOCK_SIZE,
                                                   &applied, &skipped, &failed);
+                }
                 console_puts("ckptload_sd: rc=");
                 uart_put_s32(rc);
                 console_puts(" applied=");
@@ -1056,6 +1410,126 @@ static void term_execute(char *line)
                 console_puts("\r\n");
                 g_ckpt_sd_seq = (best_hdr.seq == 0xFFFFFFFFu) ? 1u : (best_hdr.seq + 1u);
                 g_ckpt_sd_seq_seeded = 1u;
+                return;
+        }
+
+        if (streq(argv[0], "ckptinspect"))
+        {
+                uint32_t blk_words[SD_BLOCK_SIZE / 4u];
+                uint8_t *blk = (uint8_t *)blk_words;
+                uint8_t selected_blk[SD_BLOCK_SIZE];
+                checkpoint_v2_header_t best_hdr;
+                uint8_t best_found = 0u;
+                uint32_t selected_lba = 0u;
+
+                for (uint32_t slot = 0u; slot < CKPT_SD_SLOT_COUNT; slot++)
+                {
+                        checkpoint_v2_header_t hdr;
+                        if (!ckpt_sd_read_valid_slot(slot, &hdr, blk))
+                                continue;
+                        if (!best_found || hdr.seq > best_hdr.seq)
+                        {
+                                best_found = 1u;
+                                best_hdr = hdr;
+                                selected_lba = ckpt_sd_lba_for_slot(slot);
+                                buf_copy(selected_blk, blk, SD_BLOCK_SIZE);
+                        }
+                }
+
+                if (!best_found)
+                {
+                        console_puts("ckptinspect: no valid slot\r\n");
+                        return;
+                }
+
+                console_puts("ckptinspect: lba=");
+                console_put_u32(selected_lba);
+                console_puts(" slot=");
+                console_put_u32((uint32_t)best_hdr.slot_id);
+                console_puts(" seq=");
+                console_put_u32(best_hdr.seq);
+                console_puts(" regions=");
+                console_put_u32(best_hdr.region_count);
+                console_puts(" active_bitmap=0x");
+                console_put_hex32(best_hdr.active_task_bitmap);
+                console_puts("\r\n");
+
+                {
+                        const checkpoint_v2_region_t *regions =
+                                (const checkpoint_v2_region_t *)(selected_blk + sizeof(checkpoint_v2_header_t));
+                        uint32_t meta_off = u32_load_le(&best_hdr.reserved1[0]);
+                        uint32_t meta_len = u32_load_le(&best_hdr.reserved1[4]);
+                        const ckpt_lifecycle_meta_t *meta = 0;
+
+                        if (meta_len >= ckpt_meta_size(0u) && meta_off + meta_len <= SD_BLOCK_SIZE)
+                        {
+                                meta = (const ckpt_lifecycle_meta_t *)(selected_blk + meta_off);
+                                if (meta->magic != CKPT_META_MAGIC || meta->version != CKPT_META_VERSION)
+                                        meta = 0;
+                                else if (meta->entry_count > best_hdr.region_count)
+                                        meta = 0;
+                        }
+
+                        if (meta == 0)
+                        {
+                                console_puts("  meta: none\r\n");
+                        }
+                        else
+                        {
+                                console_puts("  meta: running_bitmap=0x");
+                                console_put_hex32(meta->running_bitmap);
+                                console_puts(" entries=");
+                                console_put_u32(meta->entry_count);
+                                console_puts("\r\n");
+                        }
+
+                        for (uint16_t i = 0u; i < best_hdr.region_count; i++)
+                        {
+                                const checkpoint_v2_region_t *r = &regions[i];
+                                uint32_t launch = 0u;
+                                uint32_t exit = 0u;
+                                uint8_t has_life = 0u;
+                                uint8_t would_restore = 1u;
+
+                                if (meta != 0)
+                                {
+                                        for (uint16_t j = 0u; j < meta->entry_count; j++)
+                                        {
+                                                if (meta->entries[j].task_id != (uint8_t)r->region_id)
+                                                        continue;
+                                                launch = meta->entries[j].launch_count;
+                                                exit = meta->entries[j].exit_count;
+                                                has_life = 1u;
+                                                if (launch <= exit)
+                                                        would_restore = 0u;
+                                                break;
+                                        }
+                                }
+
+                                console_puts("  region id=");
+                                console_put_u32(r->region_id);
+                                console_puts(" ver=");
+                                console_put_u32(r->state_version);
+                                console_puts(" len=");
+                                console_put_u32(r->length);
+                                if (has_life)
+                                {
+                                        console_puts(" launch=");
+                                        console_put_u32(launch);
+                                        console_puts(" exit=");
+                                        console_put_u32(exit);
+                                        console_puts(" restore=");
+                                        console_puts(would_restore ? "yes" : "no");
+                                }
+                                console_puts("\r\n");
+                        }
+                }
+                return;
+        }
+
+        if (streq(argv[0], "ckptpreview"))
+        {
+                term_ckpt_preview();
                 return;
         }
 
@@ -1748,14 +2222,14 @@ static void terminal_task_dispatch(ao_t *self, const event_t *e)
         PANIC_IF(e == 0, "terminal dispatch: null event");
 
         if (e->sig == TERM_SIG_CKPT_TIMER) {
-                uint32_t lba = 0u, slot = 0u, seq = 0u, value = 0u;
-                if (term_ckptsave_sd_once(&lba, &slot, &seq, &value) == SCHED_OK) {
+                uint32_t lba = 0u, slot = 0u, seq = 0u, regions = 0u;
+                if (term_ckptsave_sd_once(&lba, &slot, &seq, &regions) == SCHED_OK) {
                         log_puts("ckpt:auto seq=");
                         log_put_u32(seq);
                         log_puts(" slot=");
                         log_put_u32(slot);
-                        log_puts(" value=");
-                        log_put_u32(value);
+                        log_puts(" regions=");
+                        log_put_u32(regions);
                         log_puts("\r\n");
                 }
                 return;
