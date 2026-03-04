@@ -14,7 +14,8 @@ LDS_MAIN := ld/LinkerScript_main.ld
 
 # ===== Flags =====
 CPUFLAGS := -mcpu=cortex-m7 -mthumb
-CFLAGS   := -g -O0 -ffreestanding -Wall -Wextra $(CPUFLAGS) -Iinclude
+RWOS_RESTORE_SELFTEST ?= 0
+CFLAGS   := -g -O0 -ffreestanding -Wall -Wextra $(CPUFLAGS) -Iinclude -DRWOS_RESTORE_SELFTEST=$(RWOS_RESTORE_SELFTEST)
 ASFLAGS  := -g $(CPUFLAGS)
 LDFLAGS_BASE := -g -nostartfiles -nodefaultlibs -nostdlib -ffreestanding $(CPUFLAGS)
 

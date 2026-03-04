@@ -13,12 +13,55 @@
 #include "../../include/counter_task.h"
 #include "../../include/restore_registry.h"
 #include "../../include/restore_loader.h"
+#include "../../include/checkpoint_v2.h"
+#include "../../include/task_ids.h"
 
 extern void systick_init(uint32_t ticks);
 
 static void idle_hook(void)
 {
         __asm__ volatile("wfi");
+}
+
+#ifndef RWOS_RESTORE_SELFTEST
+#define RWOS_RESTORE_SELFTEST 0
+#endif
+
+static void maybe_run_restore_loader_selftest(scheduler_t *sched)
+{
+#if RWOS_RESTORE_SELFTEST
+        counter_task_state_t fake_counter = {
+                .active = 0u,
+                .bg = 0u,
+                .step_pending = 0u,
+                .limit = 50u,
+                .value = 25u,
+                .next_tick = 0u
+        };
+        checkpoint_v2_region_t region;
+        uint32_t applied = 0u;
+        uint32_t skipped = 0u;
+        uint32_t failed = 0u;
+        int rc;
+
+        region.region_id = AO_COUNTER;
+        region.state_version = 1u;
+        region.offset = 0u;
+        region.length = (uint32_t)sizeof(fake_counter);
+        region.crc32 = 0u;
+
+        rc = restore_loader_apply_regions(sched,
+                                          &region, 1u,
+                                          (const uint8_t *)&fake_counter,
+                                          (uint32_t)sizeof(fake_counter),
+                                          &applied, &skipped, &failed);
+        PANIC_IF(rc != RESTORE_LOADER_OK, "restore selftest rc");
+        PANIC_IF(applied != 1u, "restore selftest applied");
+        PANIC_IF(failed != 0u, "restore selftest failed");
+        PANIC_IF(skipped != 0u, "restore selftest skipped");
+#else
+        (void)sched;
+#endif
 }
 
 int main(void)
@@ -65,6 +108,7 @@ int main(void)
                                                        &applied, &skipped, &failed);
                 PANIC_IF(rrc != RESTORE_LOADER_OK, "restore loader bootstrap failed");
         }
+        maybe_run_restore_loader_selftest(&sched);
         if (console_task_register(&sched) != SCHED_OK)
         {
                 PANIC("console task init failed");

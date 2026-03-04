@@ -1,6 +1,8 @@
 #include "../../include/restore_loader.h"
 #include "../../include/restore_registry.h"
 
+static restore_loader_stats_t g_restore_loader_stats;
+
 static int bitmap_test_and_set(uint32_t *bits, uint8_t task_id)
 {
     uint8_t word = (uint8_t)(task_id >> 5);
@@ -28,12 +30,18 @@ int restore_loader_apply_regions(scheduler_t *sched,
     uint16_t j;
 
     if (sched == 0) {
+        g_restore_loader_stats.calls++;
+        g_restore_loader_stats.last_rc = RESTORE_LOADER_ERR_PARAM;
         return RESTORE_LOADER_ERR_PARAM;
     }
     if (regions == 0 && region_count != 0u) {
+        g_restore_loader_stats.calls++;
+        g_restore_loader_stats.last_rc = RESTORE_LOADER_ERR_PARAM;
         return RESTORE_LOADER_ERR_PARAM;
     }
     if (payload_base == 0 && payload_len != 0u) {
+        g_restore_loader_stats.calls++;
+        g_restore_loader_stats.last_rc = RESTORE_LOADER_ERR_PARAM;
         return RESTORE_LOADER_ERR_PARAM;
     }
     for (j = 0u; j < 8u; j++) {
@@ -107,9 +115,23 @@ int restore_loader_apply_regions(scheduler_t *sched,
     if (out_applied) *out_applied = applied;
     if (out_skipped) *out_skipped = skipped;
     if (out_failed) *out_failed = failed;
+    g_restore_loader_stats.calls++;
+    g_restore_loader_stats.applied += applied;
+    g_restore_loader_stats.skipped += skipped;
+    g_restore_loader_stats.failed += failed;
 
     if (failed != 0u) {
+        g_restore_loader_stats.last_rc = RESTORE_LOADER_ERR_RESTORE;
         return RESTORE_LOADER_ERR_RESTORE;
     }
+    g_restore_loader_stats.last_rc = RESTORE_LOADER_OK;
     return RESTORE_LOADER_OK;
+}
+
+void restore_loader_get_stats(restore_loader_stats_t *out)
+{
+    if (out == 0) {
+        return;
+    }
+    *out = g_restore_loader_stats;
 }

@@ -18,6 +18,7 @@
 #include "../../include/terminal.h"
 #include "../../include/panic.h"
 #include "../../include/restore_registry.h"
+#include "../../include/restore_loader.h"
 
 #define MAX_ARGUMENTS 8
 #define TICKS_PER_SEC 1000u
@@ -67,6 +68,14 @@ static void uart_put_s32(int v)
                 return;
         }
         console_put_u32((uint32_t)v);
+}
+
+static const char *restore_class_name(uint8_t task_class)
+{
+        if (task_class == TASK_CLASS_RESTORABLE_NOW) return "restorable";
+        if (task_class == TASK_CLASS_RESTART_ONLY) return "restart-only";
+        if (task_class == TASK_CLASS_NON_RESTORABLE) return "non-restorable";
+        return "unknown";
 }
 
 static void sd_print_info(void)
@@ -314,6 +323,7 @@ static void term_execute(char *line)
                 console_puts("    sdmmcdump         Dump SDMMC registers\r\n");
                 console_puts("    sderror           Show SD error details\r\n");
                 console_puts("    sdreset           Reset SD hardware state\r\n");
+                console_puts("    restorestat       Show restore loader/registry stats\r\n");
                 console_puts("\r\n");
                 return;
         }
@@ -674,6 +684,39 @@ static void term_execute(char *line)
                 extern void sd_async_init(void);
                 sd_async_init();
                 console_puts("SD hardware state reset\r\n");
+                return;
+        }
+
+        if (streq(argv[0], "restorestat"))
+        {
+                restore_loader_stats_t st;
+                restore_loader_get_stats(&st);
+                console_puts("restore: calls=");
+                console_put_u32(st.calls);
+                console_puts(" applied=");
+                console_put_u32(st.applied);
+                console_puts(" skipped=");
+                console_put_u32(st.skipped);
+                console_puts(" failed=");
+                console_put_u32(st.failed);
+                console_puts(" last_rc=");
+                uart_put_s32((int)st.last_rc);
+                console_puts("\r\n");
+
+                console_puts("registry:\r\n");
+                for (uint8_t id = 0u; id < SCHED_MAX_AO; id++)
+                {
+                        const restore_task_descriptor_t *d = restore_registry_find(id);
+                        if (d == 0)
+                                continue;
+                        console_puts("  id=");
+                        console_put_u32(id);
+                        console_puts(" class=");
+                        console_puts(restore_class_name(d->task_class));
+                        console_puts(" ver=");
+                        console_put_u32(d->state_version);
+                        console_puts("\r\n");
+                }
                 return;
         }
 
