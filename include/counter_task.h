@@ -35,6 +35,7 @@ int counter_task_register(scheduler_t *sched);
 int counter_task_request_start(uint32_t limit);
 void counter_task_systick_hook(void);
 int counter_task_register_restore_descriptor(void);
+void counter_task_restore_rebind_stdin_if_needed(void);
 
 /* State helpers for checkpoint/restore plumbing */
 int counter_task_get_state(counter_task_state_t *out);

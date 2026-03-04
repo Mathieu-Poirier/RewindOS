@@ -16,6 +16,7 @@ static counter_task_state_t g_counter_ctx;
 static event_t g_counter_queue_storage[8];
 static scheduler_t *g_counter_sched;
 static uint8_t g_counter_state_restored;
+static uint8_t g_counter_restore_needs_stdin_rebind;
 
 void counter_task_reset_state(void)
 {
@@ -25,6 +26,28 @@ void counter_task_reset_state(void)
     g_counter_ctx.limit = 0u;
     g_counter_ctx.value = 0u;
     g_counter_ctx.next_tick = 0u;
+    g_counter_restore_needs_stdin_rebind = 0u;
+}
+
+void counter_task_restore_rebind_stdin_if_needed(void)
+{
+    int rc;
+
+    if (!g_counter_restore_needs_stdin_rebind) {
+        return;
+    }
+    if (!g_counter_ctx.active || g_counter_ctx.bg) {
+        g_counter_restore_needs_stdin_rebind = 0u;
+        return;
+    }
+    if (g_counter_sched == 0 || g_counter_sched->table[AO_COUNTER] == 0) {
+        return;
+    }
+
+    rc = terminal_stdin_acquire(AO_COUNTER, TERM_STDIN_MODE_RAW);
+    if (rc == SCHED_OK || rc == SCHED_ERR_EXISTS) {
+        g_counter_restore_needs_stdin_rebind = 0u;
+    }
 }
 
 int counter_task_get_state(counter_task_state_t *out)
@@ -160,6 +183,7 @@ static void counter_task_stop(void)
 {
     g_counter_ctx.active = 0u;
     g_counter_ctx.step_pending = 0u;
+    g_counter_restore_needs_stdin_rebind = 0u;
     if (!g_counter_ctx.bg) {
         (void)terminal_stdin_release(AO_COUNTER);
     }
@@ -234,6 +258,9 @@ int counter_task_register(scheduler_t *sched)
         counter_task_reset_state();
     }
     g_counter_state_restored = 0u;
+    if (g_counter_ctx.active && !g_counter_ctx.bg) {
+        g_counter_restore_needs_stdin_rebind = 1u;
+    }
 
     task_spec_t spec;
     spec.id = AO_COUNTER;
@@ -280,6 +307,7 @@ int counter_task_request_start(uint32_t limit)
     if (is_bg) {
         g_cmd_bg_async = 1u;
     } else {
+        g_counter_restore_needs_stdin_rebind = 0u;
         g_cmd_fg_async = 1u;
     }
     return SCHED_OK;
@@ -455,6 +483,7 @@ static int counter_restore_apply_state_fn(const void *blob, uint32_t len)
     }
     g_counter_ctx = temp_state;
     g_counter_ctx.step_pending = 0u;
+    g_counter_restore_needs_stdin_rebind = 0u;
     if (g_counter_ctx.active) {
         /* Restore must not keep stale absolute tick values across reboot. */
         g_counter_ctx.next_tick = systick_now() + COUNTER_STEP_TICKS;
@@ -466,6 +495,16 @@ static int counter_restore_apply_state_fn(const void *blob, uint32_t len)
     counter_out_puts(" limit=");
     counter_out_put_u32(g_counter_ctx.limit);
     counter_out_puts("\r\n");
+
+    if (!g_counter_ctx.bg) {
+        int lock_rc = terminal_stdin_acquire(AO_COUNTER, TERM_STDIN_MODE_RAW);
+        if (lock_rc == SCHED_OK || lock_rc == SCHED_ERR_EXISTS) {
+            g_counter_restore_needs_stdin_rebind = 0u;
+        } else {
+            g_counter_restore_needs_stdin_rebind = 1u;
+        }
+    }
+
     g_counter_state_restored = 1u;
     return SCHED_OK;
 }

@@ -642,6 +642,10 @@ static int term_ckptsave_sd_once(uint32_t *out_lba, uint32_t *out_slot, uint32_t
                 region_count++;
         }
 
+        /* Do not overwrite valid A/B slots with empty checkpoints. */
+        if (region_count == 0u)
+                return SCHED_ERR_NOT_FOUND;
+
         if ((uint32_t)sizeof(checkpoint_v2_header_t) +
             ((uint32_t)region_count * (uint32_t)sizeof(checkpoint_v2_region_t)) +
             payload_bytes + meta_len > SD_BLOCK_SIZE)
@@ -1521,6 +1525,11 @@ static void term_execute(char *line)
                 int rc = term_ckptsave_sd_once(&lba, &slot, &seq, &regions);
                 if (rc != SCHED_OK)
                 {
+                        if (rc == SCHED_ERR_NOT_FOUND)
+                        {
+                                console_puts("ckptsave_sd: no restorable regions\r\n");
+                                return;
+                        }
                         console_puts("ckptsave_sd: err=");
                         uart_put_s32(rc);
                         console_puts("\r\n");
@@ -2505,7 +2514,15 @@ int terminal_task_register(scheduler_t *sched)
         spec.rtc_budget_ticks = 1;
         spec.name = "terminal";
 
-        return sched_register_task(sched, &spec);
+        {
+                int rc = sched_register_task(sched, &spec);
+                if (rc == SCHED_OK)
+                {
+                        /* Rebind restored foreground stdin owner after terminal reset. */
+                        counter_task_restore_rebind_stdin_if_needed();
+                }
+                return rc;
+        }
 }
 
 static void cmd_task_dispatch(ao_t *self, const event_t *e)
