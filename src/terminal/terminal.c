@@ -329,6 +329,7 @@ static void term_execute(char *line)
                 console_puts("    ckptload          Load counter state from in-memory ckpt queue\r\n");
                 console_puts("    ckptq             Show in-memory ckpt queue stats\r\n");
                 console_puts("    restoresim [limit] [value] [bg]  Simulate in-memory restore blob\r\n");
+                console_puts("    restoresimop <limit> <value> <mul> <div> [bg]  Simulate ordered ops restore\r\n");
                 console_puts("\r\n");
                 return;
         }
@@ -738,6 +739,8 @@ static void term_execute(char *line)
         if (streq(argv[0], "ckptsave"))
         {
                 counter_task_state_t st;
+                uint8_t blob[sizeof(restorable_envelope_t)];
+                uint32_t blob_len = (uint32_t)sizeof(blob);
                 int rc = counter_task_get_state(&st);
                 if (rc != SCHED_OK)
                 {
@@ -747,7 +750,15 @@ static void term_execute(char *line)
                         return;
                 }
                 (void)restore_sim_reset();
-                rc = restore_sim_enqueue((uint16_t)AO_COUNTER, 1u, &st, (uint32_t)sizeof(st));
+                rc = counter_task_encode_restore_envelope(&st, 0, 0, blob, &blob_len);
+                if (rc != SCHED_OK)
+                {
+                        console_puts("ckptsave: encode err=");
+                        uart_put_s32(rc);
+                        console_puts("\r\n");
+                        return;
+                }
+                rc = restore_sim_enqueue((uint16_t)AO_COUNTER, 2u, blob, blob_len);
                 if (rc != SCHED_OK)
                 {
                         console_puts("ckptsave: enqueue err=");
@@ -801,6 +812,8 @@ static void term_execute(char *line)
                 uint32_t value = 25u;
                 uint32_t bg = 0u;
                 counter_task_state_t st;
+                uint8_t blob[sizeof(restorable_envelope_t)];
+                uint32_t blob_len = (uint32_t)sizeof(blob);
                 uint32_t applied = 0u, skipped = 0u, failed = 0u;
                 int rc;
 
@@ -834,7 +847,15 @@ static void term_execute(char *line)
                 st.next_tick = systick_now() + 10u;
 
                 (void)restore_sim_reset();
-                rc = restore_sim_enqueue((uint16_t)AO_COUNTER, 1u, &st, (uint32_t)sizeof(st));
+                rc = counter_task_encode_restore_envelope(&st, 0, 0, blob, &blob_len);
+                if (rc != SCHED_OK)
+                {
+                        console_puts("restoresim: encode err=");
+                        uart_put_s32(rc);
+                        console_puts("\r\n");
+                        return;
+                }
+                rc = restore_sim_enqueue((uint16_t)AO_COUNTER, 2u, blob, blob_len);
                 if (rc != SCHED_OK)
                 {
                         console_puts("restoresim: enqueue err=");
@@ -868,6 +889,107 @@ static void term_execute(char *line)
                         console_puts("counter state: active=");
                         console_put_u32(st.active);
                         console_puts(" value=");
+                        console_put_u32(st.value);
+                        console_puts(" limit=");
+                        console_put_u32(st.limit);
+                        console_puts(" bg=");
+                        console_put_u32(st.bg);
+                        console_puts("\r\n");
+                }
+                return;
+        }
+
+        if (streq(argv[0], "restoresimop"))
+        {
+                uint32_t limit = 100u;
+                uint32_t value = 10u;
+                uint32_t mul = 2u;
+                uint32_t div = 1u;
+                uint32_t bg = 0u;
+                counter_task_state_t st;
+                counter_restore_op_t ops[2];
+                uint16_t op_count = 0u;
+                uint8_t blob[sizeof(restorable_envelope_t)];
+                uint32_t blob_len = (uint32_t)sizeof(blob);
+                uint32_t applied = 0u, skipped = 0u, failed = 0u;
+                int rc;
+
+                if (argc < 5)
+                {
+                        console_puts("usage: restoresimop <limit> <value> <mul> <div> [bg]\r\n");
+                        return;
+                }
+                if (!parse_u32(argv[1], &limit) ||
+                    !parse_u32(argv[2], &value) ||
+                    !parse_u32(argv[3], &mul) ||
+                    !parse_u32(argv[4], &div))
+                {
+                        console_puts("restoresimop: bad args\r\n");
+                        return;
+                }
+                if (argc >= 6 && !parse_u32(argv[5], &bg))
+                {
+                        console_puts("restoresimop: bad bg\r\n");
+                        return;
+                }
+                if (limit == 0u) limit = 1u;
+                if (value == 0u) value = 1u;
+                if (value > limit) value = limit;
+                if (mul > 1u) {
+                        ops[op_count].op = COUNTER_RESTORE_OP_MUL;
+                        ops[op_count].reserved[0] = 0u;
+                        ops[op_count].reserved[1] = 0u;
+                        ops[op_count].reserved[2] = 0u;
+                        ops[op_count].operand = mul;
+                        op_count++;
+                }
+                if (div > 1u) {
+                        ops[op_count].op = COUNTER_RESTORE_OP_DIV;
+                        ops[op_count].reserved[0] = 0u;
+                        ops[op_count].reserved[1] = 0u;
+                        ops[op_count].reserved[2] = 0u;
+                        ops[op_count].operand = div;
+                        op_count++;
+                }
+
+                st.active = 1u;
+                st.bg = (uint8_t)(bg & 1u);
+                st.step_pending = 0u;
+                st.limit = limit;
+                st.value = value;
+                st.next_tick = systick_now() + 10u;
+
+                rc = counter_task_encode_restore_envelope(&st, ops, op_count, blob, &blob_len);
+                if (rc != SCHED_OK)
+                {
+                        console_puts("restoresimop: encode err=");
+                        uart_put_s32(rc);
+                        console_puts("\r\n");
+                        return;
+                }
+                (void)restore_sim_reset();
+                rc = restore_sim_enqueue((uint16_t)AO_COUNTER, 2u, blob, blob_len);
+                if (rc != SCHED_OK)
+                {
+                        console_puts("restoresimop: enqueue err=");
+                        uart_put_s32(rc);
+                        console_puts("\r\n");
+                        return;
+                }
+                rc = restore_sim_apply(g_sched, &applied, &skipped, &failed);
+                console_puts("restoresimop: rc=");
+                uart_put_s32(rc);
+                console_puts(" applied=");
+                console_put_u32(applied);
+                console_puts(" skipped=");
+                console_put_u32(skipped);
+                console_puts(" failed=");
+                console_put_u32(failed);
+                console_puts("\r\n");
+
+                if (counter_task_get_state(&st) == SCHED_OK)
+                {
+                        console_puts("counter state: value=");
                         console_put_u32(st.value);
                         console_puts(" limit=");
                         console_put_u32(st.limit);

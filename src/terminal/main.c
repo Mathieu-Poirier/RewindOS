@@ -38,22 +38,26 @@ static void maybe_run_restore_loader_selftest(scheduler_t *sched)
                 .value = 25u,
                 .next_tick = 0u
         };
+        uint8_t blob[sizeof(restorable_envelope_t)];
+        uint32_t blob_len = (uint32_t)sizeof(blob);
         checkpoint_v2_region_t region;
         uint32_t applied = 0u;
         uint32_t skipped = 0u;
         uint32_t failed = 0u;
         int rc;
+        rc = counter_task_encode_restore_envelope(&fake_counter, 0, 0, blob, &blob_len);
+        PANIC_IF(rc != SCHED_OK, "restore selftest encode");
 
         region.region_id = AO_COUNTER;
-        region.state_version = 1u;
+        region.state_version = 2u;
         region.offset = 0u;
-        region.length = (uint32_t)sizeof(fake_counter);
+        region.length = blob_len;
         region.crc32 = 0u;
 
         rc = restore_loader_apply_regions(sched,
                                           &region, 1u,
-                                          (const uint8_t *)&fake_counter,
-                                          (uint32_t)sizeof(fake_counter),
+                                          (const uint8_t *)blob,
+                                          blob_len,
                                           &applied, &skipped, &failed);
         PANIC_IF(rc != RESTORE_LOADER_OK, "restore selftest rc");
         PANIC_IF(applied != 1u, "restore selftest applied");

@@ -6,6 +6,7 @@
 #include "../../include/console.h"
 #include "../../include/log.h"
 #include "../../include/restore_registry.h"
+#include "../../include/restorable_envelope.h"
 #include "../../include/systick.h"
 #include "../../include/terminal.h"
 
@@ -44,6 +45,82 @@ int counter_task_restore_state(const counter_task_state_t *in)
     /* Pending queue entries are not checkpointed. Re-arm from timer logic. */
     g_counter_ctx.step_pending = 0u;
     g_counter_state_restored = 1u;
+    return SCHED_OK;
+}
+
+int counter_task_encode_restore_envelope(const counter_task_state_t *state,
+                                         const counter_restore_op_t *ops,
+                                         uint16_t op_count,
+                                         void *out,
+                                         uint32_t *io_len)
+{
+    restorable_envelope_t *env = (restorable_envelope_t *)out;
+    uint16_t i;
+
+    if (state == 0 || out == 0 || io_len == 0) {
+        return SCHED_ERR_PARAM;
+    }
+    if (op_count > (RESTORE_ENV_MAX_ENTRIES - 1u)) {
+        return SCHED_ERR_PARAM;
+    }
+    if (op_count > 0u && ops == 0) {
+        return SCHED_ERR_PARAM;
+    }
+    if (*io_len < sizeof(restorable_envelope_t)) {
+        return SCHED_ERR_PARAM;
+    }
+
+    env->hdr.magic = RESTORE_ENV_MAGIC;
+    env->hdr.version = RESTORE_ENV_VERSION;
+    env->hdr.entry_count = (uint16_t)(1u + op_count);
+    env->hdr.read_idx = 0u;
+    env->hdr.write_idx = env->hdr.entry_count;
+    env->hdr.generation = 1u;
+    env->hdr.next_seq = (uint32_t)(env->hdr.entry_count + 1u);
+    env->hdr.program_id = AO_COUNTER;
+    env->hdr.reserved[0] = 0u;
+    env->hdr.reserved[1] = 0u;
+    env->hdr.reserved[2] = 0u;
+
+    env->entries[0].seq = 1u;
+    env->entries[0].action = COUNTER_RESTORE_ACTION_SET_STATE;
+    env->entries[0].entry_state = RESTORE_ENV_ENTRY_PENDING;
+    env->entries[0].data_len = (uint16_t)sizeof(counter_task_state_t);
+    env->entries[0].reserved = 0u;
+    for (i = 0u; i < RESTORE_ENV_ENTRY_DATA_MAX; i++) {
+        env->entries[0].data[i] = 0u;
+    }
+    for (i = 0u; i < sizeof(counter_task_state_t); i++) {
+        env->entries[0].data[i] = ((const uint8_t *)state)[i];
+    }
+
+    for (i = 0u; i < op_count; i++) {
+        uint16_t idx = (uint16_t)(i + 1u);
+        env->entries[idx].seq = (uint32_t)(idx + 1u);
+        env->entries[idx].action = COUNTER_RESTORE_ACTION_APPLY_OP;
+        env->entries[idx].entry_state = RESTORE_ENV_ENTRY_PENDING;
+        env->entries[idx].data_len = (uint16_t)sizeof(counter_restore_op_t);
+        env->entries[idx].reserved = 0u;
+        for (uint16_t j = 0u; j < RESTORE_ENV_ENTRY_DATA_MAX; j++) {
+            env->entries[idx].data[j] = 0u;
+        }
+        for (uint16_t j = 0u; j < sizeof(counter_restore_op_t); j++) {
+            env->entries[idx].data[j] = ((const uint8_t *)&ops[i])[j];
+        }
+    }
+
+    for (i = env->hdr.entry_count; i < RESTORE_ENV_MAX_ENTRIES; i++) {
+        env->entries[i].seq = 0u;
+        env->entries[i].action = 0u;
+        env->entries[i].entry_state = RESTORE_ENV_ENTRY_DONE;
+        env->entries[i].data_len = 0u;
+        env->entries[i].reserved = 0u;
+        for (uint16_t j = 0u; j < RESTORE_ENV_ENTRY_DATA_MAX; j++) {
+            env->entries[i].data[j] = 0u;
+        }
+    }
+
+    *io_len = (uint32_t)sizeof(restorable_envelope_t);
     return SCHED_OK;
 }
 
@@ -225,24 +302,126 @@ static int counter_restore_register_fn(scheduler_t *sched, const launch_intent_t
 
 static int counter_restore_get_state_fn(void *out, uint32_t *io_len)
 {
-    counter_task_state_t *state = (counter_task_state_t *)out;
+    counter_task_state_t state;
+    uint32_t cap;
+
     if (out == 0 || io_len == 0) {
         return SCHED_ERR_PARAM;
     }
-    if (*io_len < sizeof(counter_task_state_t)) {
+    cap = *io_len;
+    if (cap < sizeof(restorable_envelope_t)) {
         return SCHED_ERR_PARAM;
     }
-    *io_len = (uint32_t)sizeof(counter_task_state_t);
-    return counter_task_get_state(state);
+    if (counter_task_get_state(&state) != SCHED_OK) {
+        return SCHED_ERR_PARAM;
+    }
+    return counter_task_encode_restore_envelope(&state, 0, 0, out, io_len);
 }
 
 static int counter_restore_apply_state_fn(const void *blob, uint32_t len)
 {
-    const counter_task_state_t *state = (const counter_task_state_t *)blob;
-    if (blob == 0 || len != sizeof(counter_task_state_t)) {
+    const restorable_envelope_t *env = (const restorable_envelope_t *)blob;
+    uint8_t consumed[RESTORE_ENV_MAX_ENTRIES];
+    uint16_t i;
+
+    if (blob == 0) {
         return SCHED_ERR_PARAM;
     }
-    return counter_task_restore_state(state);
+
+    /* Backward-compat fallback for direct state blobs. */
+    if (len == sizeof(counter_task_state_t)) {
+        return counter_task_restore_state((const counter_task_state_t *)blob);
+    }
+    if (len < sizeof(restorable_envelope_t)) {
+        return SCHED_ERR_PARAM;
+    }
+    if (env->hdr.magic != RESTORE_ENV_MAGIC || env->hdr.version != RESTORE_ENV_VERSION) {
+        return SCHED_ERR_PARAM;
+    }
+    if (env->hdr.program_id != AO_COUNTER) {
+        return SCHED_ERR_PARAM;
+    }
+    if (env->hdr.entry_count == 0u || env->hdr.entry_count > RESTORE_ENV_MAX_ENTRIES) {
+        return SCHED_ERR_PARAM;
+    }
+    if (env->hdr.read_idx > env->hdr.entry_count || env->hdr.write_idx > env->hdr.entry_count) {
+        return SCHED_ERR_PARAM;
+    }
+
+    for (i = 0u; i < RESTORE_ENV_MAX_ENTRIES; i++) {
+        consumed[i] = 0u;
+    }
+
+    for (i = 0u; i < env->hdr.entry_count; i++) {
+        uint32_t best_seq = 0xFFFFFFFFu;
+        int best_idx = -1;
+        for (uint16_t j = 0u; j < env->hdr.entry_count; j++) {
+            if (consumed[j]) {
+                continue;
+            }
+            if (env->entries[j].seq < best_seq) {
+                best_seq = env->entries[j].seq;
+                best_idx = (int)j;
+            }
+        }
+        if (best_idx < 0) {
+            return SCHED_ERR_PARAM;
+        }
+        consumed[best_idx] = 1u;
+
+        {
+            const restorable_envelope_entry_t *e = &env->entries[best_idx];
+            if (e->entry_state != RESTORE_ENV_ENTRY_PENDING) {
+                continue;
+            }
+            if (e->action == COUNTER_RESTORE_ACTION_SET_STATE) {
+                if (e->data_len != sizeof(counter_task_state_t)) {
+                    return SCHED_ERR_PARAM;
+                }
+                if (counter_task_restore_state((const counter_task_state_t *)e->data) != SCHED_OK) {
+                    return SCHED_ERR_PARAM;
+                }
+                continue;
+            }
+            if (e->action == COUNTER_RESTORE_ACTION_APPLY_OP) {
+                const counter_restore_op_t *op;
+                if (e->data_len != sizeof(counter_restore_op_t)) {
+                    return SCHED_ERR_PARAM;
+                }
+                op = (const counter_restore_op_t *)e->data;
+                if (op->op == COUNTER_RESTORE_OP_ADD) {
+                    g_counter_ctx.value += op->operand;
+                } else if (op->op == COUNTER_RESTORE_OP_SUB) {
+                    if (g_counter_ctx.value > op->operand) {
+                        g_counter_ctx.value -= op->operand;
+                    } else {
+                        g_counter_ctx.value = 1u;
+                    }
+                } else if (op->op == COUNTER_RESTORE_OP_MUL) {
+                    g_counter_ctx.value *= op->operand;
+                } else if (op->op == COUNTER_RESTORE_OP_DIV) {
+                    if (op->operand == 0u) {
+                        return SCHED_ERR_PARAM;
+                    }
+                    g_counter_ctx.value /= op->operand;
+                    if (g_counter_ctx.value == 0u) {
+                        g_counter_ctx.value = 1u;
+                    }
+                } else {
+                    return SCHED_ERR_PARAM;
+                }
+                if (g_counter_ctx.value > g_counter_ctx.limit && g_counter_ctx.limit != 0u) {
+                    g_counter_ctx.value = g_counter_ctx.limit;
+                }
+                continue;
+            }
+            return SCHED_ERR_PARAM;
+        }
+    }
+
+    g_counter_ctx.step_pending = 0u;
+    g_counter_state_restored = 1u;
+    return SCHED_OK;
 }
 
 int counter_task_register_restore_descriptor(void)
@@ -250,9 +429,9 @@ int counter_task_register_restore_descriptor(void)
     static const restore_task_descriptor_t desc = {
         .task_id = AO_COUNTER,
         .task_class = TASK_CLASS_RESTORABLE_NOW,
-        .state_version = 1u,
-        .min_state_len = sizeof(counter_task_state_t),
-        .max_state_len = sizeof(counter_task_state_t),
+        .state_version = 2u,
+        .min_state_len = sizeof(restorable_envelope_header_t) + sizeof(restorable_envelope_entry_t),
+        .max_state_len = sizeof(restorable_envelope_t),
         .register_fn = counter_restore_register_fn,
         .get_state_fn = counter_restore_get_state_fn,
         .restore_fn = counter_restore_apply_state_fn,
