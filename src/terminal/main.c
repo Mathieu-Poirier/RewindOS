@@ -17,6 +17,8 @@
 #include "../../include/task_ids.h"
 #include "../../include/task_signals.h"
 #include "../../include/panic.h"
+#include "../../include/counter_task.h"
+#include "../../include/restore_registry.h"
 
 extern void systick_init(uint32_t ticks);
 extern int uart_async_resume_after_restore(void);
@@ -94,6 +96,11 @@ static void main_cold_boot(void)
 
         sched_init(&g_sched_main, idle_hook);
         uart_puts("main: sched init ok\r\n");
+        restore_registry_init();
+        if (counter_task_register_restore_descriptor() != SCHED_OK)
+        {
+                PANIC("counter restore descriptor init failed");
+        }
         if (console_task_register(&g_sched_main) != SCHED_OK)
         {
                 PANIC("console task init failed");
