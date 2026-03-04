@@ -22,7 +22,8 @@ MEMORY
 {
   /* Internal memories */
   FLASH (rx) : ORIGIN = 0x08020000, LENGTH = 896K
-  RAM    (xrw) : ORIGIN = 0x20000000, LENGTH = 320K     /* SRAM (DTCM+SRAM1/2 aggregate if applicable) */
+  RAM    (xrw) : ORIGIN = 0x20000000, LENGTH = (320K - 64) /* SRAM minus handoff page */
+  HANDOFF (xrw) : ORIGIN = 0x2004FFC0, LENGTH = 64      /* fixed boot->app handoff blob */
 
   /* External SDRAM via FMC (adjust LENGTH to your board) */
   SDRAM  (xrw) : ORIGIN = 0xC0000000, LENGTH = 8M
@@ -148,6 +149,14 @@ SECTIONS
     . = . + _Min_Stack_Size;
     . = ALIGN(8);
   } > RAM
+
+  /* Fixed handoff region shared between boot image and main image. */
+  .boot_handoff (NOLOAD) :
+  {
+    . = ALIGN(4);
+    KEEP(*(.boot_handoff))
+    . = ALIGN(4);
+  } > HANDOFF
 
   /* ----------------------- MISC / ATTRIBUTES -------------------------- */
 
