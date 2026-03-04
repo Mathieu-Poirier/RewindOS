@@ -26,6 +26,8 @@
 #define CMD_MAILBOX_CAP 8u
 #define TERM_STDIN_OWNER_NONE 0xFFu
 #define TERM_SHORTCUT_CTRL_C 0x03
+#define SDWRITE_TEST_LBA 2048u
+#define CKPT_SD_LBA 2060u
 
 typedef struct {
         shell_state_t shell;
@@ -46,6 +48,18 @@ typedef struct {
 static event_t g_cmd_queue_storage[8];
 static cmd_slot_t g_cmd_slots[CMD_MAILBOX_CAP];
 static uint8_t g_cmd_alloc_cursor;
+static uint8_t g_sdwrite_test_block[SD_BLOCK_SIZE];
+static uint32_t g_ckpt_sd_seq = 1u;
+
+static void buf_zero(uint8_t *p, uint32_t n)
+{
+        for (uint32_t i = 0u; i < n; i++) p[i] = 0u;
+}
+
+static void buf_copy(uint8_t *dst, const uint8_t *src, uint32_t n)
+{
+        for (uint32_t i = 0u; i < n; i++) dst[i] = src[i];
+}
 
 void ui_notify_bg_done(const char *name)
 {
@@ -316,6 +330,10 @@ static void term_execute(char *line)
                 console_puts("    sdread <lba> [n]  Read blocks (n<=4)\r\n");
                 console_puts("    sdaread <lba>     Async read one block\r\n");
                 console_puts("    sddetect          Check card presence\r\n");
+                console_puts("    sdwrite0          Write test block to fixed LBA\r\n");
+                console_puts("    sdread0cmp        Read+verify fixed test block\r\n");
+                console_puts("    ckptsave_sd       Save counter checkpoint to fixed SD block\r\n");
+                console_puts("    ckptload_sd       Load counter checkpoint from fixed SD block\r\n");
                 console_puts("\r\n");
                 console_puts("  Debug\r\n");
                 console_puts("    md <addr> [n]     Memory dump\r\n");
@@ -634,6 +652,217 @@ static void term_execute(char *line)
                         uart_put_s32(rc);
                         console_puts("\r\n");
                 }
+                return;
+        }
+
+        if (streq(argv[0], "sdwrite0"))
+        {
+                int rc;
+                for (uint32_t i = 0u; i < SD_BLOCK_SIZE; i++)
+                        g_sdwrite_test_block[i] = (uint8_t)((i * 13u + 7u) & 0xFFu);
+                g_sdwrite_test_block[0] = 'R';
+                g_sdwrite_test_block[1] = 'W';
+                g_sdwrite_test_block[2] = 'O';
+                g_sdwrite_test_block[3] = 'S';
+                g_sdwrite_test_block[4] = 'T';
+                g_sdwrite_test_block[5] = 'E';
+                g_sdwrite_test_block[6] = 'S';
+                g_sdwrite_test_block[7] = 'T';
+
+                rc = sd_write_blocks(SDWRITE_TEST_LBA, 1u, g_sdwrite_test_block);
+                if (rc != SD_OK)
+                {
+                        console_puts("sdwrite0: err=");
+                        uart_put_s32(rc);
+                        console_puts(" stage=");
+                        console_put_u32(sd_dbg_write_stage());
+                        console_puts(" sta=0x");
+                        console_put_hex32(sd_dbg_write_last_sta());
+                        console_puts("\r\n");
+                        return;
+                }
+                console_puts("sdwrite0: ok lba=");
+                console_put_u32(SDWRITE_TEST_LBA);
+                console_puts("\r\n");
+                return;
+        }
+
+        if (streq(argv[0], "sdread0cmp"))
+        {
+                uint8_t rd[SD_BLOCK_SIZE];
+                int rc = sd_read_blocks(SDWRITE_TEST_LBA, 1u, rd);
+                if (rc != SD_OK)
+                {
+                        console_puts("sdread0cmp: read err=");
+                        uart_put_s32(rc);
+                        console_puts("\r\n");
+                        return;
+                }
+                for (uint32_t i = 0u; i < SD_BLOCK_SIZE; i++)
+                {
+                        uint8_t exp = (uint8_t)((i * 13u + 7u) & 0xFFu);
+                        if (i == 0u) exp = 'R';
+                        if (i == 1u) exp = 'W';
+                        if (i == 2u) exp = 'O';
+                        if (i == 3u) exp = 'S';
+                        if (i == 4u) exp = 'T';
+                        if (i == 5u) exp = 'E';
+                        if (i == 6u) exp = 'S';
+                        if (i == 7u) exp = 'T';
+                        if (rd[i] != exp)
+                        {
+                                console_puts("sdread0cmp: mismatch at ");
+                                console_put_u32(i);
+                                console_puts(" got=0x");
+                                console_put_hex8(rd[i]);
+                                console_puts(" exp=0x");
+                                console_put_hex8(exp);
+                                console_puts("\r\n");
+                                return;
+                        }
+                }
+                console_puts("sdread0cmp: ok lba=");
+                console_put_u32(SDWRITE_TEST_LBA);
+                console_puts("\r\n");
+                return;
+        }
+
+        if (streq(argv[0], "ckptsave_sd"))
+        {
+                uint32_t blk_words[SD_BLOCK_SIZE / 4u];
+                uint8_t *blk = (uint8_t *)blk_words;
+                checkpoint_v2_header_t hdr;
+                checkpoint_v2_region_t reg;
+                counter_task_state_t st;
+                uint8_t env_blob[sizeof(restorable_envelope_t)];
+                uint32_t env_len = (uint32_t)sizeof(env_blob);
+                int rc;
+                uint32_t payload_off = (uint32_t)(sizeof(checkpoint_v2_header_t) + sizeof(checkpoint_v2_region_t));
+
+                rc = counter_task_get_state(&st);
+                if (rc != SCHED_OK)
+                {
+                        console_puts("ckptsave_sd: counter state err=");
+                        uart_put_s32(rc);
+                        console_puts("\r\n");
+                        return;
+                }
+                rc = counter_task_encode_restore_envelope(&st, 0, 0, env_blob, &env_len);
+                if (rc != SCHED_OK)
+                {
+                        console_puts("ckptsave_sd: encode err=");
+                        uart_put_s32(rc);
+                        console_puts("\r\n");
+                        return;
+                }
+                if (payload_off + env_len > SD_BLOCK_SIZE)
+                {
+                        console_puts("ckptsave_sd: blob too large\r\n");
+                        return;
+                }
+
+                buf_zero(blk, SD_BLOCK_SIZE);
+                hdr.magic = CKPT_V2_MAGIC;
+                hdr.format_version = CKPT_V2_FORMAT_VERSION;
+                hdr.header_size = (uint16_t)sizeof(checkpoint_v2_header_t);
+                hdr.seq = g_ckpt_sd_seq++;
+                hdr.tick_at_checkpoint = systick_now();
+                hdr.slot_id = 0u;
+                hdr.state = CKPT_SLOT_STATE_COMMITTED;
+                hdr.region_count = 1u;
+                hdr.active_task_bitmap = (st.active ? (1u << AO_COUNTER) : 0u);
+                hdr.stdin_owner = TERM_STDIN_OWNER_NONE;
+                hdr.reserved0[0] = 0u;
+                hdr.reserved0[1] = 0u;
+                hdr.reserved0[2] = 0u;
+                hdr.regions_crc32 = 0u;
+                hdr.header_crc32 = 0u;
+                for (uint32_t i = 0u; i < sizeof(hdr.reserved1); i++) hdr.reserved1[i] = 0u;
+
+                reg.region_id = (uint16_t)AO_COUNTER;
+                reg.state_version = 2u;
+                reg.offset = payload_off;
+                reg.length = env_len;
+                reg.crc32 = 0u;
+
+                buf_copy(blk, (const uint8_t *)&hdr, (uint32_t)sizeof(hdr));
+                buf_copy(blk + sizeof(hdr), (const uint8_t *)&reg, (uint32_t)sizeof(reg));
+                buf_copy(blk + payload_off, env_blob, env_len);
+
+                rc = sd_write_blocks(CKPT_SD_LBA, 1u, blk_words);
+                if (rc != SD_OK)
+                {
+                        console_puts("ckptsave_sd: write err=");
+                        uart_put_s32(rc);
+                        console_puts(" stage=");
+                        console_put_u32(sd_dbg_write_stage());
+                        console_puts(" sta=0x");
+                        console_put_hex32(sd_dbg_write_last_sta());
+                        console_puts("\r\n");
+                        return;
+                }
+
+                console_puts("ckptsave_sd: ok lba=");
+                console_put_u32(CKPT_SD_LBA);
+                console_puts(" seq=");
+                console_put_u32(hdr.seq);
+                console_puts(" value=");
+                console_put_u32(st.value);
+                console_puts("\r\n");
+                return;
+        }
+
+        if (streq(argv[0], "ckptload_sd"))
+        {
+                uint32_t blk_words[SD_BLOCK_SIZE / 4u];
+                uint8_t *blk = (uint8_t *)blk_words;
+                checkpoint_v2_header_t hdr;
+                checkpoint_v2_region_t reg;
+                uint32_t applied = 0u, skipped = 0u, failed = 0u;
+                int rc;
+
+                rc = sd_read_blocks(CKPT_SD_LBA, 1u, blk_words);
+                if (rc != SD_OK)
+                {
+                        console_puts("ckptload_sd: read err=");
+                        uart_put_s32(rc);
+                        console_puts("\r\n");
+                        return;
+                }
+
+                buf_copy((uint8_t *)&hdr, blk, (uint32_t)sizeof(hdr));
+                if (hdr.magic != CKPT_V2_MAGIC ||
+                    hdr.format_version != CKPT_V2_FORMAT_VERSION ||
+                    hdr.state != CKPT_SLOT_STATE_COMMITTED ||
+                    hdr.region_count != 1u ||
+                    hdr.header_size != sizeof(checkpoint_v2_header_t))
+                {
+                        console_puts("ckptload_sd: invalid header\r\n");
+                        return;
+                }
+
+                buf_copy((uint8_t *)&reg, blk + sizeof(checkpoint_v2_header_t), (uint32_t)sizeof(reg));
+                if (reg.offset + reg.length > SD_BLOCK_SIZE || reg.offset < sizeof(checkpoint_v2_header_t) + sizeof(checkpoint_v2_region_t))
+                {
+                        console_puts("ckptload_sd: invalid region bounds\r\n");
+                        return;
+                }
+
+                rc = restore_loader_apply_regions(g_sched,
+                                                  &reg, 1u,
+                                                  blk, SD_BLOCK_SIZE,
+                                                  &applied, &skipped, &failed);
+                console_puts("ckptload_sd: rc=");
+                uart_put_s32(rc);
+                console_puts(" applied=");
+                console_put_u32(applied);
+                console_puts(" skipped=");
+                console_put_u32(skipped);
+                console_puts(" failed=");
+                console_put_u32(failed);
+                console_puts(" seq=");
+                console_put_u32(hdr.seq);
+                console_puts("\r\n");
                 return;
         }
 
