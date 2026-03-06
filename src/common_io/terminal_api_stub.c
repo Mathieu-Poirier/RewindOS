@@ -31,6 +31,18 @@ __attribute__((weak)) uint32_t terminal_ckpt_get_interval_ms(void)
     return 0u;
 }
 
+__attribute__((weak)) int terminal_ckpt_save_sd_once(uint32_t *out_lba,
+                                                     uint32_t *out_slot,
+                                                     uint32_t *out_seq,
+                                                     uint32_t *out_regions)
+{
+    if (out_lba) *out_lba = 0u;
+    if (out_slot) *out_slot = 0u;
+    if (out_seq) *out_seq = 0u;
+    if (out_regions) *out_regions = 0u;
+    return SCHED_ERR_NOT_FOUND;
+}
+
 __attribute__((weak)) int terminal_ckpt_load_latest_sd(scheduler_t *sched,
                                                        uint32_t *out_applied,
                                                        uint32_t *out_skipped,

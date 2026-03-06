@@ -209,7 +209,7 @@ static void main_cold_boot(void)
         }
         /* Run loader selftest before boot restore so test payloads cannot
          * overwrite/unregister a successfully restored runtime task. */
-        maybe_run_restore_loader_selftest(&sched);
+        maybe_run_restore_loader_selftest(&g_sched_main);
         if (has_boot_cfg && boot_cfg.boot_restore_enabled)
         {
                 if (sd_is_detected() && sd_get_info()->initialized)
@@ -234,7 +234,6 @@ static void main_cold_boot(void)
                         uart_puts("bootrestore: sd init failed\r\n");
                 }
         }
-        maybe_run_restore_loader_selftest(&g_sched_main);
         if (console_task_register(&g_sched_main) != SCHED_OK)
         {
                 PANIC("console task init failed");
