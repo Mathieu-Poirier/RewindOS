@@ -9,6 +9,7 @@
 #include "../../include/scheduler.h"
 #include "../../include/console.h"
 #include "../../include/terminal.h"
+#include "../../include/checkpoint_task.h"
 #include "../../include/sd_task.h"
 #include "../../include/panic.h"
 #include "../../include/counter_task.h"
@@ -185,13 +186,17 @@ int main(void)
         {
                 PANIC("cmd task init failed");
         }
-        if (has_boot_cfg)
-        {
-                terminal_ckpt_set_interval_ms(boot_cfg.ckpt_interval_ms);
-        }
         if (sd_task_register(&sched) != SCHED_OK)
         {
                 PANIC("sd task init failed");
+        }
+        if (checkpoint_task_register(&sched) != SCHED_OK)
+        {
+                PANIC("checkpoint task init failed");
+        }
+        if (has_boot_cfg)
+        {
+                checkpoint_task_set_interval_ms(boot_cfg.ckpt_interval_ms);
         }
         sched_run(&sched);
         for (;;)

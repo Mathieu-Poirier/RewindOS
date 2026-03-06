@@ -14,6 +14,7 @@
 #include "../../include/task_spec.h"
 #include "../../include/task_ids.h"
 #include "../../include/task_signals.h"
+#include "../../include/checkpoint_task.h"
 #include "../../include/shutdown.h"
 #include "../../include/terminal.h"
 #include "../../include/panic.h"
@@ -57,9 +58,6 @@ static uint8_t g_cmd_alloc_cursor;
 static uint8_t g_sdwrite_test_block[SD_BLOCK_SIZE];
 static uint32_t g_ckpt_sd_seq = 1u;
 static uint8_t g_ckpt_sd_seq_seeded = 0u;
-static uint32_t g_ckpt_auto_interval_ms = 0u;
-static uint32_t g_ckpt_auto_interval_ticks = 0u;
-static uint32_t g_ckpt_auto_next_tick = 0u;
 static uint32_t g_ckpt_running_prev_bitmap = 0u;
 static uint16_t g_ckpt_launch_count[SCHED_MAX_AO];
 static uint16_t g_ckpt_exit_count[SCHED_MAX_AO];
@@ -193,49 +191,6 @@ static void ckpt_sd_seed_seq_if_needed(void)
 
         g_ckpt_sd_seq = (max_seq == 0xFFFFFFFFu) ? 1u : (max_seq + 1u);
         g_ckpt_sd_seq_seeded = 1u;
-}
-
-void terminal_ckpt_set_interval_ms(uint32_t interval_ms)
-{
-        if (interval_ms == 0u)
-        {
-                g_ckpt_auto_interval_ms = 0u;
-                g_ckpt_auto_interval_ticks = 0u;
-                g_ckpt_auto_next_tick = 0u;
-                return;
-        }
-
-        uint32_t ticks = ((interval_ms * TICKS_PER_SEC) + 999u) / 1000u;
-        if (ticks == 0u)
-                ticks = 1u;
-        g_ckpt_auto_interval_ms = interval_ms;
-        g_ckpt_auto_interval_ticks = ticks;
-        g_ckpt_auto_next_tick = systick_now() + ticks;
-}
-
-uint32_t terminal_ckpt_get_interval_ms(void)
-{
-        return g_ckpt_auto_interval_ms;
-}
-
-void terminal_task_systick_hook(void)
-{
-        event_t ev;
-        uint32_t now;
-
-        if (g_sched == 0 || g_ckpt_auto_interval_ticks == 0u)
-                return;
-
-        now = systick_now();
-        if ((int32_t)(now - g_ckpt_auto_next_tick) < 0)
-                return;
-
-        g_ckpt_auto_next_tick = now + g_ckpt_auto_interval_ticks;
-        ev.sig = TERM_SIG_CKPT_TIMER;
-        ev.src = 0u;
-        ev.arg0 = 0u;
-        ev.arg1 = 0u;
-        (void)sched_post_isr(g_sched, AO_TERMINAL, &ev);
 }
 
 typedef struct {
@@ -552,7 +507,7 @@ static void term_ckpt_preview(void)
         }
 }
 
-static int term_ckptsave_sd_once(uint32_t *out_lba, uint32_t *out_slot, uint32_t *out_seq, uint32_t *out_regions)
+int terminal_ckpt_save_sd_once(uint32_t *out_lba, uint32_t *out_slot, uint32_t *out_seq, uint32_t *out_regions)
 {
         uint32_t blk_words[SD_BLOCK_SIZE / 4u];
         uint8_t *blk = (uint8_t *)blk_words;
@@ -1522,7 +1477,7 @@ static void term_execute(char *line)
         if (streq(argv[0], "ckptsave_sd"))
         {
                 uint32_t lba = 0u, slot = 0u, seq = 0u, regions = 0u;
-                int rc = term_ckptsave_sd_once(&lba, &slot, &seq, &regions);
+                int rc = terminal_ckpt_save_sd_once(&lba, &slot, &seq, &regions);
                 if (rc != SCHED_OK)
                 {
                         if (rc == SCHED_ERR_NOT_FOUND)
@@ -1553,13 +1508,13 @@ static void term_execute(char *line)
                 if (argc < 2)
                 {
                         console_puts("autockpt: ");
-                        console_put_u32(terminal_ckpt_get_interval_ms());
+                        console_put_u32(checkpoint_task_get_interval_ms());
                         console_puts(" ms\r\n");
                         return;
                 }
                 if (streq(argv[1], "off") || streq(argv[1], "0"))
                 {
-                        terminal_ckpt_set_interval_ms(0u);
+                        checkpoint_task_set_interval_ms(0u);
                         console_puts("autockpt: off\r\n");
                         return;
                 }
@@ -1568,9 +1523,9 @@ static void term_execute(char *line)
                         console_puts("usage: autockpt <ms|off>\r\n");
                         return;
                 }
-                terminal_ckpt_set_interval_ms(ms);
+                checkpoint_task_set_interval_ms(ms);
                 console_puts("autockpt: on every ");
-                console_put_u32(terminal_ckpt_get_interval_ms());
+                console_put_u32(checkpoint_task_get_interval_ms());
                 console_puts(" ms\r\n");
                 return;
         }
@@ -2455,20 +2410,6 @@ static void terminal_task_dispatch(ao_t *self, const event_t *e)
         PANIC_IF(e == 0, "terminal dispatch: null event");
         if (e == 0)
                 return;
-
-        if (e->sig == TERM_SIG_CKPT_TIMER) {
-                uint32_t lba = 0u, slot = 0u, seq = 0u, regions = 0u;
-                if (term_ckptsave_sd_once(&lba, &slot, &seq, &regions) == SCHED_OK) {
-                        log_puts("ckpt:auto seq=");
-                        log_put_u32(seq);
-                        log_puts(" slot=");
-                        log_put_u32(slot);
-                        log_puts(" regions=");
-                        log_put_u32(regions);
-                        log_puts("\r\n");
-                }
-                return;
-        }
 
         if (e->sig == TERM_SIG_REPRINT_PROMPT) {
                 if (!term_stdin_owner_valid())
