@@ -4,6 +4,7 @@
 #include "../include/jump.h"
 #include "../include/sd.h"
 #include "../include/boot_handoff.h"
+#include "../include/checkpoint_v2.h"
 
 extern void enable_sdmmc1_kerclk_sysclk(void);
 extern void enable_sdmmc1_kerclk_pll48(void);
@@ -22,8 +23,156 @@ extern void enable_gpiod(void);
 #define GPIOD_BASE 0x40020C00u
 
 static uint32_t sd_buf_words[SD_BLOCK_SIZE / 4u];
-static uint32_t g_boot_ckpt_interval_ms = 0u;
-static uint32_t g_boot_restore_enabled = 0u;
+static uint32_t g_boot_ckpt_interval_ms = BOOT_CFG_DEFAULT_CKPT_INTERVAL_MS;
+static uint32_t g_boot_restore_enabled = BOOT_CFG_DEFAULT_RESTORE_ENABLED;
+
+static void uart_put_s32(int v);
+static int sd_require_present(void);
+
+static void boot_config_set_defaults(void)
+{
+        g_boot_ckpt_interval_ms = BOOT_CFG_DEFAULT_CKPT_INTERVAL_MS;
+        g_boot_restore_enabled = BOOT_CFG_DEFAULT_RESTORE_ENABLED;
+}
+
+static void boot_put_ckpt_interval(uint32_t interval_ms)
+{
+        if (interval_ms == 0u)
+        {
+                uart_puts("off");
+                return;
+        }
+
+        uart_put_u32(interval_ms);
+        uart_puts(" ms");
+}
+
+static void boot_print_config(void)
+{
+        uart_puts("config: restore=");
+        uart_puts(g_boot_restore_enabled ? "on" : "off");
+        uart_puts(" ckptint=");
+        boot_put_ckpt_interval(g_boot_ckpt_interval_ms);
+        uart_puts("\r\n");
+}
+
+static void boot_print_config_usage(void)
+{
+        uart_puts("usage: config [--restore=on|off] [--ckptint=<ms|off>]\r\n");
+}
+
+static int boot_parse_restore_value(const char *value, uint32_t *out_enabled)
+{
+        if (value == 0 || out_enabled == 0)
+                return 0;
+
+        if (streq(value, "on"))
+        {
+                *out_enabled = 1u;
+                return 1;
+        }
+        if (streq(value, "off"))
+        {
+                *out_enabled = 0u;
+                return 1;
+        }
+        return 0;
+}
+
+static int boot_parse_ckpt_interval_value(const char *value, uint32_t *out_interval_ms)
+{
+        uint32_t interval_ms = 0u;
+
+        if (value == 0 || out_interval_ms == 0)
+                return 0;
+
+        if (streq(value, "off") || streq(value, "0"))
+        {
+                *out_interval_ms = 0u;
+                return 1;
+        }
+        if (!parse_u32(value, &interval_ms) || interval_ms == 0u)
+                return 0;
+
+        *out_interval_ms = interval_ms;
+        return 1;
+}
+
+static int boot_sd_ensure_initialized(void)
+{
+        int rc;
+
+        if (!sd_require_present())
+                return 0;
+        if (sd_get_info()->initialized)
+                return 1;
+
+        sd_use_pll48(0);
+        sd_set_data_clkdiv(SD_CLKDIV_BOOT);
+        rc = sd_init();
+        if (rc == SD_OK)
+                return 1;
+
+        uart_puts("format: sd init err=");
+        uart_put_s32(rc);
+        uart_puts("\r\n");
+        return 0;
+}
+
+static int boot_format_restore_slots(void)
+{
+        int rc;
+
+        if (!boot_sd_ensure_initialized())
+                return 0;
+
+        for (uint32_t i = 0u; i < (SD_BLOCK_SIZE / 4u); i++)
+                sd_buf_words[i] = 0u;
+
+        rc = sd_write_blocks(CKPT_SD_LEGACY_SLOT0_LBA, 1u, sd_buf_words);
+        if (rc != SD_OK)
+        {
+                uart_puts("format: write err=");
+                uart_put_s32(rc);
+                uart_puts(" lba=");
+                uart_put_u32(CKPT_SD_LEGACY_SLOT0_LBA);
+                uart_puts("\r\n");
+                return 0;
+        }
+
+        rc = sd_write_blocks(CKPT_SD_LEGACY_SLOT1_LBA, 1u, sd_buf_words);
+        if (rc != SD_OK)
+        {
+                uart_puts("format: write err=");
+                uart_put_s32(rc);
+                uart_puts(" lba=");
+                uart_put_u32(CKPT_SD_LEGACY_SLOT1_LBA);
+                uart_puts("\r\n");
+                return 0;
+        }
+
+        for (uint32_t slot = 0u; slot < CKPT_SD_SLOT_COUNT; slot++)
+        {
+                uint32_t slot_lba = CKPT_SD_SLOT_BASE_LBA + (slot * CKPT_SD_SLOT_BLOCKS);
+                for (uint32_t block = 0u; block < CKPT_SD_SLOT_BLOCKS; block++)
+                {
+                        rc = sd_write_blocks(slot_lba + block, 1u, sd_buf_words);
+                        if (rc != SD_OK)
+                        {
+                                uart_puts("format: write err=");
+                                uart_put_s32(rc);
+                                uart_puts(" lba=");
+                                uart_put_u32(slot_lba + block);
+                                uart_puts("\r\n");
+                                return 0;
+                        }
+                }
+        }
+
+        boot_handoff_clear();
+        uart_puts("format: restore checkpoints cleared\r\n");
+        return 1;
+}
 
 static void uart_put_s32(int v)
 {
@@ -265,9 +414,14 @@ static void boot_dispatch(char *line)
         {
                 uart_puts("\r\n");
                 uart_puts("  Boot\r\n");
-                uart_puts("    bootfast          Jump to main firmware\r\n");
-                uart_puts("    ckptint <ms|off>  Set periodic checkpoint interval for next bootfast\r\n");
-                uart_puts("    bootrestore <on|off|status>  Auto-restore latest checkpoint on bootfast\r\n");
+                uart_puts("    clear             Clear terminal screen\r\n");
+                uart_puts("    boot              Jump to main firmware with current boot config\r\n");
+                uart_puts("    config [--restore=on|off] [--ckptint=<ms|off>]\r\n");
+                uart_puts("                      Show/set boot restore + checkpoint config\r\n");
+                uart_puts("    format            Erase saved checkpoints / restore targets\r\n");
+                uart_puts("    bootfast          Legacy alias for boot\r\n");
+                uart_puts("    ckptint <ms|off>  Legacy alias for config --ckptint=<...>\r\n");
+                uart_puts("    bootrestore <on|off|status>  Legacy alias for config --restore=<...>\r\n");
                 uart_puts("\r\n");
                 uart_puts("  SD Card\r\n");
                 uart_puts("    sdinit            Initialize SD card\r\n");
@@ -290,7 +444,75 @@ static void boot_dispatch(char *line)
                 return;
         }
 
-        if (streq(argv[0], "bootfast"))
+        if (streq(argv[0], "clear"))
+        {
+                uart_puts("\x1b[2J\x1b[H");
+                return;
+        }
+
+        if (streq(argv[0], "config"))
+        {
+                uint32_t restore_enabled = g_boot_restore_enabled;
+                uint32_t ckpt_interval_ms = g_boot_ckpt_interval_ms;
+
+                if (argc == 1 || streq(argv[1], "status"))
+                {
+                        boot_print_config();
+                        return;
+                }
+
+                for (int i = 1; i < argc; i++)
+                {
+                        char *key = argv[i];
+                        char *eq;
+                        const char *value;
+
+                        if (key[0] == '-' && key[1] == '-')
+                                key += 2;
+
+                        eq = key;
+                        while (*eq && *eq != '=')
+                                eq++;
+                        if (*eq != '=')
+                        {
+                                boot_print_config_usage();
+                                return;
+                        }
+
+                        *eq = '\0';
+                        value = eq + 1;
+
+                        if (streq(key, "restore"))
+                        {
+                                if (!boot_parse_restore_value(value, &restore_enabled))
+                                {
+                                        boot_print_config_usage();
+                                        return;
+                                }
+                                continue;
+                        }
+
+                        if (streq(key, "ckptint"))
+                        {
+                                if (!boot_parse_ckpt_interval_value(value, &ckpt_interval_ms))
+                                {
+                                        boot_print_config_usage();
+                                        return;
+                                }
+                                continue;
+                        }
+
+                        boot_print_config_usage();
+                        return;
+                }
+
+                g_boot_restore_enabled = restore_enabled;
+                g_boot_ckpt_interval_ms = ckpt_interval_ms;
+                boot_print_config();
+                return;
+        }
+
+        if (streq(argv[0], "boot") || streq(argv[0], "bootfast"))
         {
                 boot_handoff_cfg_t cfg;
                 cfg.ckpt_interval_ms = g_boot_ckpt_interval_ms;
@@ -302,6 +524,17 @@ static void boot_dispatch(char *line)
                 for (;;)
                 {
                 }
+        }
+
+        if (streq(argv[0], "format"))
+        {
+                if (argc != 1)
+                {
+                        uart_puts("usage: format\r\n");
+                        return;
+                }
+                (void)boot_format_restore_slots();
+                return;
         }
 
         if (streq(argv[0], "bootrestore"))
@@ -330,29 +563,21 @@ static void boot_dispatch(char *line)
 
         if (streq(argv[0], "ckptint"))
         {
-                uint32_t ms = 0u;
                 if (argc < 2)
                 {
-                        uart_puts("ckptint=");
-                        uart_put_u32(g_boot_ckpt_interval_ms);
-                        uart_puts(" ms\r\n");
+                        uart_puts("ckptint: ");
+                        boot_put_ckpt_interval(g_boot_ckpt_interval_ms);
+                        uart_puts("\r\n");
                         return;
                 }
-                if (streq(argv[1], "off") || streq(argv[1], "0"))
-                {
-                        g_boot_ckpt_interval_ms = 0u;
-                        uart_puts("ckptint: off\r\n");
-                        return;
-                }
-                if (!parse_u32(argv[1], &ms) || ms == 0u)
+                if (!boot_parse_ckpt_interval_value(argv[1], &g_boot_ckpt_interval_ms))
                 {
                         uart_puts("usage: ckptint <ms|off>\r\n");
                         return;
                 }
-                g_boot_ckpt_interval_ms = ms;
                 uart_puts("ckptint: ");
-                uart_put_u32(g_boot_ckpt_interval_ms);
-                uart_puts(" ms\r\n");
+                boot_put_ckpt_interval(g_boot_ckpt_interval_ms);
+                uart_puts("\r\n");
                 return;
         }
 
@@ -598,6 +823,8 @@ static void boot_dispatch(char *line)
 
 void boot_main(void)
 {
+        boot_config_set_defaults();
+
         uart_puts("\r\n");
         uart_puts("RewindOS Bootloader\r\n");
         uart_puts("\r\n");

@@ -330,6 +330,11 @@ Per checkpoint slot format:
 3. Region payload blobs
 4. Commit trailer/header update to `COMMITTED` with final CRC
 
+Implementation note:
+- Legacy bring-up checkpoints used `format_version=2` and packed one whole slot into a single 512-byte SD block.
+- Current storage uses `format_version=3` with fixed multi-block slots so task blobs can grow beyond one block.
+- Boot scans both formats during migration, but new checkpoints are always written in the current multi-block layout.
+
 ### Checkpoint write flow
 
 1. `AO_CHECKPOINT` triggers at deterministic RTC boundary
@@ -347,6 +352,9 @@ Per checkpoint slot format:
 4. Recreate dynamic tasks from launch intent
 5. Apply per-task durable state (`restore_state`)
 6. Resume scheduler and interaction
+
+Operational reset:
+- Boot shell may expose a maintenance command to clear checkpoint slots entirely when operators need to discard stale restore targets and force a clean boot path.
 
 ### Failure policy
 
@@ -456,6 +464,8 @@ Scenario: user runs `counter 50`, checkpoint occurs at progress `25`, board rebo
 8. Kernel recreates/registers counter task instance.
 9. Kernel applies saved counter state to task.
 10. Kernel rebinds stdin ownership (foreground owner = counter).
+11. If another crash happens before counter reaches `50`, restore picks the newest committed running checkpoint and resumes from that later saved value.
+12. Once counter exits, the next checkpoint must supersede that running snapshot with terminal lifecycle state so restore does not resurrect completed work.
 11. Scheduler runs; SysTick triggers next step event.
 12. Counter continues from `25` to `50` and exits normally.
 
@@ -809,6 +819,11 @@ These defaults are implementation-ready and can be revised later with version bu
   - max task state blob: 4096 bytes
   - max checkpoint slot payload: bounded by slot size and directory
 
+Current slot sizing:
+- checkpoint slot count: 2
+- checkpoint slot extent: 16 SD blocks per slot (`8192` bytes)
+- legacy one-block slots are read-only compatibility inputs during migration and are not written anymore
+
 ### 3) Task/app identity namespace
 
 - `0..127` reserved for kernel tasks.
@@ -826,13 +841,14 @@ These defaults are implementation-ready and can be revised later with version bu
 
 ### 5) Checkpoint cadence and budgeting
 
-- Default cadence: every 10 seconds or manual trigger.
+- Default cadence: every 5 seconds or manual trigger.
 - Budget: max 1 RTC slice per scheduler turn for checkpoint AO.
 - If checkpoint backlog persists, defer next checkpoint trigger until current one finishes.
 - Retry failed checkpoint write up to 2 times, then wait for next cadence tick.
 
 ### 6) Recovery policy matrix (boot)
 
+- Default boot policy is auto-restore enabled; boot config may disable restore for a forced cold boot or diagnostics run.
 - Any failed `RESTORABLE_NOW` required task restore => fallback to previous committed slot.
 - If no previous committed slot exists => cold boot.
 - `RESTART_ONLY` failures do not block restore target.

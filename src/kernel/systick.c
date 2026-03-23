@@ -2,6 +2,8 @@
 #include "../../include/stdint.h"
 #include "../../include/uart.h"
 #include "../../include/counter_task.h"
+#include "../../include/assembly_line_task.h"
+#include "../../include/snake_task.h"
 #include "../../include/checkpoint_task.h"
 
 volatile uint32_t g_ticks = 0;
@@ -10,6 +12,8 @@ void SysTick_Handler(void)
 {
         g_ticks++;
         counter_task_systick_hook();
+        assembly_line_task_systick_hook();
+        snake_task_systick_hook();
         checkpoint_task_systick_hook();
 }
 

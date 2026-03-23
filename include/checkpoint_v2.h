@@ -2,11 +2,18 @@
 
 #include "stdint.h"
 
-/* v2 checkpoint format constants */
+/* Checkpoint format constants. */
 #define CKPT_V2_MAGIC 0x32545043u /* "CPT2" */
 #define CKPT_V2_FORMAT_VERSION 2u
+#define CKPT_V3_FORMAT_VERSION 3u
+#define CKPT_FORMAT_VERSION_CURRENT CKPT_V3_FORMAT_VERSION
 #define CKPT_V2_MAX_REGIONS 64u
 #define CKPT_V2_MAX_TASK_STATE_BLOB 4096u
+#define CKPT_SD_LEGACY_SLOT0_LBA 2060u
+#define CKPT_SD_LEGACY_SLOT1_LBA 2061u
+#define CKPT_SD_SLOT_BASE_LBA 2080u
+#define CKPT_SD_SLOT_COUNT 2u
+#define CKPT_SD_SLOT_BLOCKS 16u
 
 enum {
     CKPT_SLOT_STATE_PENDING = 0,

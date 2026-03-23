@@ -13,6 +13,8 @@
 #include "../../include/sd_task.h"
 #include "../../include/panic.h"
 #include "../../include/counter_task.h"
+#include "../../include/assembly_line_task.h"
+#include "../../include/snake_task.h"
 #include "../../include/restore_registry.h"
 #include "../../include/restore_loader.h"
 #include "../../include/checkpoint_v2.h"
@@ -117,10 +119,23 @@ int main(void)
 
         sched_init(&sched, idle_hook);
         has_boot_cfg = (uint8_t)boot_handoff_consume(&boot_cfg);
+        if (!has_boot_cfg)
+        {
+                boot_cfg.ckpt_interval_ms = BOOT_CFG_DEFAULT_CKPT_INTERVAL_MS;
+                boot_cfg.boot_restore_enabled = BOOT_CFG_DEFAULT_RESTORE_ENABLED;
+        }
         restore_registry_init();
         if (counter_task_register_restore_descriptor() != SCHED_OK)
         {
                 PANIC("counter restore descriptor init failed");
+        }
+        if (assembly_line_task_register_restore_descriptor() != SCHED_OK)
+        {
+                PANIC("assembly restore descriptor init failed");
+        }
+        if (snake_task_register_restore_descriptor() != SCHED_OK)
+        {
+                PANIC("snake restore descriptor init failed");
         }
         if (console_task_register_restore_descriptor() != SCHED_OK)
         {
@@ -150,26 +165,29 @@ int main(void)
         /* Run loader selftest before boot restore so test payloads cannot
          * overwrite/unregister a successfully restored runtime task. */
         maybe_run_restore_loader_selftest(&sched);
-        if (has_boot_cfg && boot_cfg.boot_restore_enabled)
+        if (boot_cfg.boot_restore_enabled)
         {
                 if (sd_is_detected() && sd_get_info()->initialized)
                 {
                         uint32_t applied = 0u, skipped = 0u, failed = 0u, seq = 0u;
                         int rrc = terminal_ckpt_load_latest_sd(&sched,
                                                                &applied, &skipped, &failed, &seq);
-                        uart_puts("bootrestore: rc=");
-                        uart_put_s32_main(rrc);
-                        uart_puts(" applied=");
-                        uart_put_u32(applied);
-                        uart_puts(" skipped=");
-                        uart_put_u32(skipped);
-                        uart_puts(" failed=");
-                        uart_put_u32(failed);
-                        uart_puts(" seq=");
-                        uart_put_u32(seq);
-                        uart_puts("\r\n");
+                        if (rrc == SCHED_OK || has_boot_cfg || rrc != SCHED_ERR_NOT_FOUND)
+                        {
+                                uart_puts("bootrestore: rc=");
+                                uart_put_s32_main(rrc);
+                                uart_puts(" applied=");
+                                uart_put_u32(applied);
+                                uart_puts(" skipped=");
+                                uart_put_u32(skipped);
+                                uart_puts(" failed=");
+                                uart_put_u32(failed);
+                                uart_puts(" seq=");
+                                uart_put_u32(seq);
+                                uart_puts("\r\n");
+                        }
                 }
-                else
+                else if (has_boot_cfg)
                 {
                         uart_puts("bootrestore: sd init failed\r\n");
                 }
@@ -194,10 +212,7 @@ int main(void)
         {
                 PANIC("checkpoint task init failed");
         }
-        if (has_boot_cfg)
-        {
-                checkpoint_task_set_interval_ms(boot_cfg.ckpt_interval_ms);
-        }
+        checkpoint_task_set_interval_ms(boot_cfg.ckpt_interval_ms);
         sched_run(&sched);
         for (;;)
         {

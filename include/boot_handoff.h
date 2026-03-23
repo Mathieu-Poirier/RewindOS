@@ -4,6 +4,8 @@
 
 #define BOOT_HANDOFF_MAGIC 0x48444E52u /* "RNDH" */
 #define BOOT_HANDOFF_VERSION 2u
+#define BOOT_CFG_DEFAULT_CKPT_INTERVAL_MS 5000u
+#define BOOT_CFG_DEFAULT_RESTORE_ENABLED 1u
 
 typedef struct {
     uint32_t magic;
